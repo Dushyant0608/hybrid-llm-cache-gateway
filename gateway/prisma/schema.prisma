@@ -1,0 +1,39 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Get a free hosted Postgres database in seconds: `npx create-db`
+
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["postgresqlExtensions"]
+}
+
+datasource db {
+  provider   = "postgresql"
+  extensions = [pgvector(map: "vector")]
+}
+
+model CachedResponse {
+  id         String                    @id @default(uuid())
+  query      String
+  embedding  Unsupported("vector(384)")
+  response   String
+  createdAt  DateTime                  @default(now())
+  hitCount   Int                       @default(0)
+  lastHitAt  DateTime?
+
+  @@map("cached_responses")
+}
+
+model TelemetryLog {
+  id              String   @id @default(uuid())
+  query           String
+  cacheHit        Boolean
+  similarityScore Float?
+  alphaUsed       Float
+  thresholdUsed   Float
+  latencyMs       Int
+  createdAt       DateTime @default(now())
+
+  @@map("telemetry_logs")
+}
