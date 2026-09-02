@@ -1,6 +1,4 @@
-import { PrismaClient } from "@prisma/client";
-
-const prisma = new PrismaClient();
+import {prisma} from '../service/prisma.js';
 
 export const searchSemantic = async (embedding) => {
     const vec = `[${embedding.join(',')}]`;
