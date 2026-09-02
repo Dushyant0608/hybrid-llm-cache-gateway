@@ -140,51 +140,57 @@ The primary claim to prove: Hybrid Adaptive achieves a better hit rate vs false 
 ## Directory Structure
 
 ```
-hybrid-cache-middleware/
+hybrid-llm-cache-gateway/
 │
 ├── gateway/                          # Node.js Express service
 │   ├── src/
-│   │   ├── index.js                  # Entry point, Express setup
 │   │   ├── middleware/
-│   │   │   ├── cacheMiddleware.js    # Main middleware — orchestrates the full flow
-│   │   │   ├── exactMatch.js         # Redis L1 check
-│   │   │   ├── semanticSearch.js     # pgvector query + cosine score
-│   │   │   ├── lexicalScorer.js      # Jaccard similarity implementation
-│   │   │   └── hybridScorer.js       # Fusion formula
+│   │   │   ├── cacheMiddleware.js    ✅ Main middleware — orchestrates full flow
+│   │   │   ├── exactMatch.js         ✅ Redis L1 exact match check
+│   │   │   ├── semanticSearch.js     ✅ pgvector cosine similarity search + store
+│   │   │   ├── lexicalScorer.js      ✅ Weighted Jaccard similarity
+│   │   │   ├── hybridScorer.js       ✅ α × semantic + (1-α) × lexical
+│   │   │   ├── embedder.js           ⬜ HTTP client → Python embedder
+│   │   │   └── gemini.js             ⬜ Gemini API call on cache miss
 │   │   ├── services/
-│   │   │   ├── redis.js              # ioredis client + config reader
-│   │   │   └── telemetry.js          # Async log writer
+│   │   │   ├── redis.js              ✅ ioredis client + config reader/writer
+│   │   │   └── telemetry.js          ⬜ Async log writer to Postgres
 │   │   └── config/
-│   │       └── defaults.js           # Fallback α and threshold for first boot only
+│   │       └── defaults.js           ✅ Cold start α and threshold init
 │   ├── prisma/
-│   │   └── schema.prisma             # CachedResponse + TelemetryLog models
-│   ├── package.json
-│   └── .env.example
+│   │   ├── schema.prisma             ✅ CachedResponse + TelemetryLog models
+│   │   ├── prisma7.config.ts         ✅
+│   │   └── migrations/               ✅ Init migration done
+│   ├── app.js                        ✅ Express app setup
+│   ├── server.js                     ✅ Entry point + initConfig
+│   └── package.json
 │
-├── optimizer/                        # Python worker service
-│   ├── worker.py                     # Main script — runs on schedule
-│   ├── db.py                         # Postgres connection + telemetry queries
-│   ├── redis_client.py               # Redis connection + config writer
-│   ├── bayesian.py                   # gp_minimize wrapper
-│   ├── scorer.py                     # Performance metric calculation
-│   ├── embedder.py                   # MiniLM-L6 local embedding via sentence-transformers
-│   └── requirements.txt
+├── optimizer/                        # Python services
+│   ├── embedder.py                   ⬜ MiniLM-L6 HTTP server (always running)
+│   ├── worker.py                     ⬜ Bayesian optimizer (runs every 30 min)
+│   ├── db.py                         ⬜ Postgres connection + telemetry queries
+│   ├── redis_client.py               ⬜ Redis connection + config writer
+│   ├── bayesian.py                   ⬜ gp_minimize wrapper
+│   ├── scorer.py                     ⬜ Performance metric calculation
+│   └── requirements.txt              ⬜
 │
 ├── evaluation/                       # Evaluation harness
 │   ├── query_set/
-│   │   ├── paraphrases.json          # Same meaning, different words
-│   │   ├── trap_pairs.json           # Similar topic, opposite meaning
-│   │   └── unrelated.json            # Completely different topics
-│   ├── run_eval.js                   # Replays queries, records results
-│   └── results/                      # Output CSVs and charts
+│   │   ├── paraphrases.json          ⬜ Same meaning, different words
+│   │   ├── trap_pairs.json           ⬜ Similar topic, opposite meaning
+│   │   └── unrelated.json            ⬜ Completely different topics
+│   ├── run_eval.js                   ⬜ Replays queries, records results
+│   └── results/                      ⬜ Output CSVs and charts
 │
-├── demo-app/                         # Minimal app to show middleware in action
-│   ├── index.js                      # Simple Express app that routes through gateway
-│   └── package.json
+├── demo-app/                         # Minimal demo
+│   ├── index.js                      ⬜ Simple Express app routing through gateway
+│   └── package.json                  ⬜
 │
-├── docker-compose.yml                # Redis + PostgreSQL for local development
-├── .env.example
-└── README.md
+├── docker-compose.yml                ✅ Postgres (pgvector) + Redis
+├── .env                              ✅
+├── .env.example                      ⬜
+├── plan.md                           ✅
+└── README.md                         ⬜
 ```
 
 ---
