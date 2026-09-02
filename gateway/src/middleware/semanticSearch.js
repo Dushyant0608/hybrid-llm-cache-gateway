@@ -2,7 +2,7 @@ import { PrismaClient } from "@prisma/client";
 
 const prisma = new PrismaClient();
 
-export const semanticSearch = async (embedding) => {
+export const searchSemantic = async (embedding) => {
     const vec = `[${embedding.join(',')}]`;
 
     const rows = await prisma.$queryRaw`

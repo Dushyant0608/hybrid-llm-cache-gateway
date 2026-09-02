@@ -1,5 +1,5 @@
 import express from "express"
-import { cacheMiddleware } from "./src/middleware/cacheMiddleware";
+import { cacheMiddleware } from "./src/middleware/cacheMiddleware.js";
 const app = express();
 
 app.use(express.json());

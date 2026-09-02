@@ -1,5 +1,5 @@
 import crypto from 'crypto';
-import { get, set } from '../services/redis.js';
+import { get, set } from '../service/redis.js';
 
 const hash = (query) => crypto.createHash('md5').update(query.trim().toLowerCase()).digest('hex');
 
