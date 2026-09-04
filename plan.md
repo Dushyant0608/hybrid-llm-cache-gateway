@@ -150,11 +150,11 @@ hybrid-llm-cache-gateway/
 │   │   │   ├── semanticSearch.js     ✅ pgvector cosine similarity search + store
 │   │   │   ├── lexicalScorer.js      ✅ Weighted Jaccard similarity
 │   │   │   ├── hybridScorer.js       ✅ α × semantic + (1-α) × lexical
-│   │   │   ├── embedder.js           ⬜ HTTP client → Python embedder
-│   │   │   └── gemini.js             ⬜ Gemini API call on cache miss
+│   │   │   ├── embedder.js           ✅ HTTP client → Python embedder
+│   │   │   └── gemini.js             ✅ Gemini API call on cache miss
 │   │   ├── services/
 │   │   │   ├── redis.js              ✅ ioredis client + config reader/writer
-│   │   │   └── telemetry.js          ⬜ Async log writer to Postgres
+│   │   │   └── telemetry.js          ✅ Async log writer to Postgres
 │   │   └── config/
 │   │       └── defaults.js           ✅ Cold start α and threshold init
 │   ├── prisma/
