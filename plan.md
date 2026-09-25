@@ -56,6 +56,8 @@ User request ──────────▶│                               
                         │  5. Fuse scores using α          │
                         │  6. Hit or miss decision         │
                         │  7. Log to telemetry table       │
+                        │     (raw semantic + lexical +    │
+                        │      shouldHit ground truth)     │
                         └────────────┬─────────────────────┘
                                      │
                     ┌────────────────┼────────────────┐
@@ -70,12 +72,14 @@ User request ──────────▶│                               
                     ▲
                     │ writes new α + threshold
                     │
-          ┌─────────────────────┐
-          │   Python Worker     │
-          │                     │
-          │ reads telemetry     │
-          │ runs gp_minimize    │
-          │ updates Redis config│
+          ┌─────────────────────┐        ┌─────────────────────┐
+          │   Python Worker     │        │  Traffic Simulator   │
+          │                     │        │                      │
+          │ reads telemetry     │        │ sends labeled queries│
+          │ re-simulates with   │        │ with shouldHit flag  │
+          │   candidate params  │        │ (paraphrases, traps, │
+          │ runs gp_minimize    │        │  unrelated)          │
+          │ updates Redis config│        └─────────────────────┘
           └─────────────────────┘
 ```
 
@@ -91,7 +95,58 @@ User request ──────────▶│                               
 6. **Fuse** — `score = α × semantic + (1-α) × lexical` using current α from Redis
 7. **Decide** — if best score > threshold (from Redis), return cached response. Otherwise call Gemini API for a real LLM response
 8. **Store** — on miss, store query + embedding + response in Postgres and Redis (with TTL)
-9. **Log** — write decision row to telemetry table regardless of hit or miss
+9. **Log** — write decision row to telemetry table including:
+   - `semanticScore` — raw cosine similarity (before blending)
+   - `lexicalScore` — raw Jaccard score (before blending)
+   - `similarityScore` — final blended score (for reference)
+   - `shouldHit` — ground truth label (provided by simulator, null in real traffic)
+
+---
+
+## Score Data Flow (Critical Design Decision)
+
+### Problem discovered
+
+The gateway originally computed both raw scores (semantic + lexical), blended them into one `similarityScore`, and only logged the blended result. The raw components were discarded.
+
+The optimizer needs the raw scores to answer: "what if α was 0.3 instead of 0.7?" — which requires recomputing `candidate_α × semantic + (1 - candidate_α) × lexical` per log row. With only the blended score stored, this is mathematically impossible — you can't un-blend `0.7A + 0.3B = 0.82` back into A and B.
+
+### Fix
+
+Log all three values in every telemetry row:
+
+| Column | What it stores | Who uses it |
+|--------|---------------|-------------|
+| `semanticScore` | Raw cosine similarity from pgvector | Optimizer (for re-simulation) |
+| `lexicalScore` | Raw Weighted Jaccard score | Optimizer (for re-simulation) |
+| `similarityScore` | `α × semantic + (1-α) × lexical` | Reference / debugging |
+| `shouldHit` | Ground truth label from simulator | Optimizer (for false positive rate) |
+
+### How the optimizer uses them
+
+```python
+def objective(params):
+    candidate_alpha, candidate_threshold = params
+    logs = fetch_recent_logs()
+
+    simulated_hits = 0
+    false_positives = 0
+    for log in logs:
+        semantic, lexical, should_hit = log.semanticScore, log.lexicalScore, log.shouldHit
+        # Re-blend with candidate alpha
+        new_score = candidate_alpha * semantic + (1 - candidate_alpha) * lexical
+        would_hit = new_score >= candidate_threshold
+        if would_hit:
+            simulated_hits += 1
+            if not should_hit:
+                false_positives += 1
+
+    hit_rate = simulated_hits / len(logs)
+    fp_rate = false_positives / max(simulated_hits, 1)
+    return -(hit_rate - fp_rate * penalty_weight)
+```
+
+Now `gp_minimize` gets different scores for different `[alpha, threshold]` candidates — it can actually learn.
 
 ---
 
@@ -99,22 +154,57 @@ User request ──────────▶│                               
 
 Every 30 minutes the Python worker:
 
-1. Reads last N rows from `telemetry_logs` table
+1. Reads last N rows from `telemetry_logs` table (including `semanticScore`, `lexicalScore`, `shouldHit`)
 2. Checks minimum log threshold — skips cycle if fewer than 30 rows exist
-3. Calculates a performance score for the current (α, threshold) pair:
-   `performance = hit_rate - (false_positive_rate × penalty_weight)`
-4. Passes this measurement to `gp_minimize` from scikit-optimize
-5. scikit-optimize returns the next (α, threshold) pair to try — chosen intelligently based on all past measurements, not randomly
-6. Worker writes new values to `cache:config` key in Redis
+3. Defines `objective(params)` that re-simulates hit/miss for each log using candidate `[alpha, threshold]`
+4. Passes `objective` to `gp_minimize` from scikit-optimize
+5. scikit-optimize evaluates multiple candidates, each getting a different score based on the re-simulation
+6. Worker writes the best `[alpha, threshold]` to `cache:config` key in Redis
 7. Gateway reads new values on next request
 
-Each 30-minute cycle is one experiment. The system is not mining historical data to find a pattern — it is running live trials, one after another, each informed by everything before it. The Gaussian Process builds a map of which (α, threshold) regions perform well and directs the next trial toward unexplored promising areas rather than guessing randomly.
+Each 30-minute cycle is one experiment. The Gaussian Process builds a map of which (α, threshold) regions perform well and directs the next trial toward unexplored promising areas rather than guessing randomly.
+
+---
+
+## Ground Truth via Fabricated Traffic
+
+### Why fabricated traffic
+
+In real production, you can't automatically know if a cache hit returned the *correct* answer. The system has no way to label a hit as "right" or "wrong" without human review. This is an open research problem.
+
+**Our approach:** Build the system for production, but test it with a traffic simulator that sends queries with known ground truth labels. This lets us:
+
+- Measure real false positive rates (not guesses)
+- Give the optimizer actual `shouldHit` labels to learn from
+- Run controlled experiments (Baseline vs Hybrid Fixed vs Hybrid Adaptive)
+- Validate the system works before deploying on real traffic
+
+### How it works
+
+The traffic simulator sends requests to the gateway with an extra field:
+
+```json
+{
+    "query": "How do I start the server?",
+    "shouldHit": true
+}
+```
+
+The gateway passes `shouldHit` through to telemetry logging. In real production traffic, this field would be `null` — the system still works, the optimizer just uses hit rate and latency alone without false positive penalties.
+
+### Query set composition
+
+| Category | Purpose | `shouldHit` label | Example |
+|----------|---------|-------------------|---------|
+| Paraphrase pairs | Same meaning, different words — should hit | `true` (after first query cached) | "How to start the server" → "What's the command to launch the server" |
+| Trap pairs | Similar topic, opposite meaning — should NOT hit | `false` | "Start the server" → "Stop the server" |
+| Unrelated queries | Completely different topics — should miss | `false` | "Start the server" → "What's the weather today" |
 
 ---
 
 ## Evaluation Plan
 
-Three configurations tested on the same fixed query set:
+Three configurations tested on the same fabricated traffic:
 
 | Config | Description |
 |---|---|
@@ -122,14 +212,9 @@ Three configurations tested on the same fixed query set:
 | Hybrid Fixed | Fusion formula, fixed α=0.7, fixed threshold=0.85 |
 | Hybrid Adaptive | Full system, Bayesian optimizer running |
 
-Query set composition:
-- Paraphrase pairs — same meaning, different words (should hit)
-- Trap pairs — similar topic, opposite meaning like start/stop (should miss)
-- Unrelated queries — completely different topics (should always miss)
-
 Metrics measured:
 - Hit rate — what % of requests were served from cache
-- False positive rate — what % of cache hits were actually wrong answers
+- False positive rate — what % of cache hits were actually wrong answers (using `shouldHit` ground truth)
 - Latency — average response time per configuration
 - Parameter convergence — how α and threshold change over time as optimizer runs
 
@@ -149,37 +234,39 @@ hybrid-llm-cache-gateway/
 │   │   │   ├── exactMatch.js         ✅ Redis L1 exact match check
 │   │   │   ├── semanticSearch.js     ✅ pgvector cosine similarity search + store
 │   │   │   ├── lexicalScorer.js      ✅ Weighted Jaccard similarity
-│   │   │   ├── hybridScorer.js       ✅ α × semantic + (1-α) × lexical
+│   │   │   ├── hybridScorer.js       🔧 Returns raw semantic + lexical alongside blended score
 │   │   │   ├── embedder.js           ✅ HTTP client → Python embedder
 │   │   │   └── gemini.js             ✅ Gemini API call on cache miss
-│   │   ├── services/
+│   │   ├── service/
 │   │   │   ├── redis.js              ✅ ioredis client + config reader/writer
-│   │   │   └── telemetry.js          ✅ Async log writer to Postgres
+│   │   │   ├── telemetry.js          🔧 Updated to accept semanticScore, lexicalScore, shouldHit
+│   │   │   └── prisma.js             ✅ Prisma client setup
 │   │   └── config/
-│   │       └── defaults.js           ✅ Cold start α and threshold init
+│   │       └── default.js            ✅ Cold start α and threshold init
 │   ├── prisma/
-│   │   ├── schema.prisma             ✅ CachedResponse + TelemetryLog models
+│   │   ├── schema.prisma             🔧 Add semanticScore, lexicalScore, shouldHit columns
 │   │   ├── prisma7.config.ts         ✅
-│   │   └── migrations/               ✅ Init migration done
+│   │   └── migrations/               🔧 New migration needed
 │   ├── app.js                        ✅ Express app setup
 │   ├── server.js                     ✅ Entry point + initConfig
-│   └── package.json
+│   └── package.json                  ✅
 │
 ├── optimizer/                        # Python services
-│   ├── embedder.py                   ⬜ MiniLM-L6 HTTP server (always running)
-│   ├── worker.py                     ⬜ Bayesian optimizer (runs every 30 min)
-│   ├── db.py                         ⬜ Postgres connection + telemetry queries
-│   ├── redis_client.py               ⬜ Redis connection + config writer
-│   ├── bayesian.py                   ⬜ gp_minimize wrapper
-│   ├── scorer.py                     ⬜ Performance metric calculation
-│   └── requirements.txt              ⬜
+│   ├── embedder.py                   ✅ MiniLM-L6 HTTP server (FastAPI)
+│   ├── db.py                         ✅ Postgres connection + telemetry queries (bug-fixed)
+│   ├── redis_client.py               ✅ Redis connection + config read/write (bug-fixed)
+│   ├── scorer.py                     🔧 Rework: re-simulate with candidate params + shouldHit FP rate
+│   ├── bayesian.py                   ⬜ gp_minimize wrapper with proper objective function
+│   ├── worker.py                     ⬜ Ties it all together on 30-min loop
+│   └── requirements.txt              ✅
 │
-├── evaluation/                       # Evaluation harness
+├── evaluation/                       # Fabricated traffic testing
 │   ├── query_set/
-│   │   ├── paraphrases.json          ⬜ Same meaning, different words
-│   │   ├── trap_pairs.json           ⬜ Similar topic, opposite meaning
-│   │   └── unrelated.json            ⬜ Completely different topics
-│   ├── run_eval.js                   ⬜ Replays queries, records results
+│   │   ├── paraphrases.json          ⬜ Same meaning, different words (shouldHit: true)
+│   │   ├── trap_pairs.json           ⬜ Similar topic, opposite meaning (shouldHit: false)
+│   │   └── unrelated.json            ⬜ Completely different topics (shouldHit: false)
+│   ├── simulate_traffic.js           ⬜ Sends labeled queries to gateway over time
+│   ├── run_eval.js                   ⬜ Three-config comparison (Baseline vs Fixed vs Adaptive)
 │   └── results/                      ⬜ Output CSVs and charts
 │
 ├── demo-app/                         # Minimal demo
@@ -189,68 +276,131 @@ hybrid-llm-cache-gateway/
 ├── docker-compose.yml                ✅ Postgres (pgvector) + Redis
 ├── .env                              ✅
 ├── .env.example                      ⬜
-├── plan.md                           ✅
+├── plan.md                           ✅ (this file)
 └── README.md                         ⬜
 ```
 
+**Legend:** ✅ = done and working, 🔧 = exists but needs update, ⬜ = not built yet
+
 ---
 
-## Build Strategy
+## Changes Log
 
-### Phase 1 — Infrastructure (Week 1)
+### Bugs fixed in optimizer (Sep 24, 2026)
+
+| File | Bug | Fix |
+|------|-----|-----|
+| `embedder.py` | `/embed` endpoint had no `return` statement — always returned `null` | Added `return {"embedding": vec}` |
+| `redis_client.py` | `get_config()` crashed with `TypeError` when Redis key didn't exist (`json.loads(None)`) | Added `None` guard before `json.loads` |
+| `db.py` | Connection leak — `cur.close()` and `conn.close()` unreachable on exception | Wrapped in `try/finally` with `conn = None` / `cur = None` init before try block |
+| `scorer.py` | `log[0] == True` fragile comparison | Changed to `log[0]` (truthy check) |
+
+### Design fix: raw score logging (Sep 24, 2026)
+
+**Problem:** The optimizer's `objective(params)` function received candidate `[alpha, threshold]` from `gp_minimize` but couldn't use them because the telemetry table only stored the pre-blended `similarityScore`. The raw `semanticScore` and `lexicalScore` were computed in `hybridScorer.js`, blended, and the individual components were thrown away.
+
+**Impact:** `gp_minimize` got the same score for every candidate — it literally could not optimize anything. The loop ran but learned nothing.
+
+**Fix requires changes in:**
+1. `schema.prisma` — add `semanticScore`, `lexicalScore` columns
+2. `hybridScorer.js` — return all three scores (semantic, lexical, blended)
+3. `cacheMiddleware.js` — pass raw scores to telemetry logger
+4. `telemetry.js` — accept and write the new fields
+5. `db.py` — query the new columns
+6. `scorer.py` — re-simulate hit/miss with candidate params using raw scores
+
+### New: ground truth via `shouldHit` (Sep 25, 2026)
+
+Added `shouldHit` boolean column to `TelemetryLog` — carries the expected correct answer from the traffic simulator. Lets the optimizer compute real false positive rates instead of approximations. Value is `null` for real (non-simulated) traffic.
+
+### New: fabricated traffic approach (Sep 25, 2026)
+
+Instead of testing on real production traffic (where ground truth is unknowable), the system is tested with a traffic simulator (`simulate_traffic.js`) that sends queries with known `shouldHit` labels. The system is built production-ready, but validated with controlled fabricated traffic.
+
+---
+
+## Build Strategy (Updated)
+
+### Phase 1 — Infrastructure ✅ DONE
 - Docker Compose running Redis + Postgres locally
 - pgvector extension enabled
 - Prisma schema: `CachedResponse` table and `TelemetryLog` table
-- Gateway skeleton — Express server that proxies requests through with no caching yet
+- Gateway skeleton — Express server that proxies requests through
 - MiniLM-L6 embedding call working end to end via sentence-transformers
-
-**Done when:** A request flows through the gateway, gets embedded locally, and comes back. Nothing cached yet.
 
 ---
 
-### Phase 2 — Baseline cache (Week 2)
+### Phase 2 — Baseline cache ✅ DONE
 - L1 Redis exact match check with TTL
 - pgvector nearest neighbor query in Postgres
 - Fixed threshold decision (α=1.0, threshold=0.85 — pure semantic)
 - Cache miss stores to Redis + Postgres
 - Telemetry logging on every decision
 
-**Done when:** The system works as a functional semantic cache. This is your baseline for evaluation. Run your trap pairs manually and observe the false positives happening.
+---
+
+### Phase 3 — Hybrid scorer ✅ DONE
+- Jaccard scorer in Node
+- Fusion formula with configurable α from Redis
+- `hybridScorer.js`, `lexicalScorer.js` working
 
 ---
 
-### Phase 3 — Hybrid scorer (Week 3)
-- Implement Jaccard scorer in Node (~20 lines)
-- Implement fusion formula with fixed α=0.7
-- Re-run trap pairs and confirm false positive rate drops
+### Phase 4 — Schema + telemetry updates ⬜ NEXT
+Update the gateway to log raw scores and ground truth labels.
 
-**Done when:** "Start server" and "Stop server" no longer collide. You have a number showing improvement over baseline.
+**4a. Schema migration**
+- Add `semanticScore Float?` to `TelemetryLog` (raw cosine similarity)
+- Add `lexicalScore Float?` to `TelemetryLog` (raw Jaccard score)
+- Add `shouldHit Boolean?` to `TelemetryLog` (ground truth from simulator)
+- Keep existing `similarityScore` as the blended score (rename optional but not required)
+- Run `npx prisma migrate dev`
 
----
+**4b. Gateway code updates**
+- `hybridScorer.js` — return `{ score, semantic, lexical }` instead of just the blended number
+- `cacheMiddleware.js` — destructure raw scores and pass them + `shouldHit` (from `req.body`) to telemetry
+- `telemetry.js` — accept `semanticScore`, `lexicalScore`, `shouldHit` and write them to the database
 
-### Phase 4 — Python worker (Week 4-5)
-- Learn just enough Python: psycopg2, redis-py, basic functions
-- `db.py` reads recent telemetry rows
-- `scorer.py` calculates hit rate and false positive rate from logs
-- `bayesian.py` wraps `gp_minimize` — takes past (α, threshold, score) tuples, returns next pair to try
-- `worker.py` ties it all together, runs on a schedule with 30-log minimum guard
-- Gateway reads `cache:config` from Redis instead of hardcoded defaults
-
-**Done when:** You can watch α and threshold values changing in Redis as the worker runs.
+**Done when:** A request logged to `telemetry_logs` includes all three score columns and `shouldHit` (null for requests without the field).
 
 ---
 
-### Phase 5 — Evaluation (Week 6-7)
-- Build `run_eval.js` — replays all three query set categories in a fixed order
-- Run all three configurations (Baseline, Hybrid Fixed, Hybrid Adaptive) separately
-- Record hit rate, false positive rate, latency per configuration
-- Plot parameter convergence over time for Hybrid Adaptive
+### Phase 5 — Optimizer (Python worker) ⬜
+Build the Bayesian optimization loop with the correct objective function.
+
+**5a. Update existing files**
+- `db.py` — update SQL query to select `semanticScore`, `lexicalScore`, `shouldHit` alongside existing columns
+- `scorer.py` — rework to accept candidate `[alpha, threshold]`, re-simulate hit/miss per log using raw scores, compute real false positive rate using `shouldHit`
+
+**5b. New files**
+- `bayesian.py` — wraps `gp_minimize`, defines `objective(params)` that calls scorer with candidate params
+- `worker.py` — main loop: fetch logs → guard (min 30 rows) → run bayesian → write new config to Redis → sleep 30 minutes
+
+**Done when:** Worker runs, α and threshold values change in Redis based on telemetry data, and different candidate params produce different scores.
+
+---
+
+### Phase 6 — Fabricated traffic + evaluation ⬜
+Build the traffic simulator and run the three-config comparison.
+
+**6a. Query sets**
+- `evaluation/query_set/paraphrases.json` — same meaning, different words
+- `evaluation/query_set/trap_pairs.json` — similar topic, opposite meaning
+- `evaluation/query_set/unrelated.json` — completely different topics
+
+**6b. Traffic simulator**
+- `evaluation/simulate_traffic.js` — reads query sets, sends labeled requests to gateway with `shouldHit` field, spreads them over time to generate realistic telemetry for the optimizer
+
+**6c. Three-config evaluation**
+- `evaluation/run_eval.js` — runs Baseline (α=1.0), Hybrid Fixed (α=0.7), Hybrid Adaptive (optimizer running) on the same query set, records metrics per config
+- Output: CSVs and comparison tables in `evaluation/results/`
 
 **Done when:** You have a table and at least one graph showing Hybrid Adaptive outperforms Baseline on the hit rate vs false positive tradeoff.
 
 ---
 
-### Phase 6 — Writeup + polish (Week 8)
+### Phase 7 — Demo app + writeup ⬜
+- `demo-app/` — minimal Express app that routes through the gateway
 - README with architecture diagram and setup instructions
 - Mini paper structure: Abstract, Problem, Related Work, System Design, Evaluation, Conclusion
 - Cite: GPTCache, Category-Aware Caching paper, INFOCOM 2026 paper (differentiate explicitly), Temporal Semantic Caching paper
@@ -269,6 +419,9 @@ hybrid-llm-cache-gateway/
 | Optimizer | scikit-optimize gp_minimize | Correct tool, well documented, no need to implement Bayesian from scratch |
 | Parameter store | Redis key | Both Node and Python can read/write, zero latency for gateway |
 | Telemetry store | PostgreSQL table | Persistent, queryable, already in stack |
+| Raw score logging | Store semantic + lexical separately | Optimizer must re-blend with candidate α to evaluate alternatives |
+| Ground truth | `shouldHit` column from simulator | Real FP rate instead of heuristic approximation |
+| Testing approach | Fabricated traffic with known labels | Production-ready code, validated with controlled experiments |
 
 ---
 
@@ -284,9 +437,9 @@ def run_optimization_cycle():
         print("Not enough data yet, skipping this cycle")
         return
 
-    score = calculate_performance(logs)
-    next_params = bayesian_suggest(score)
-    update_redis_config(next_params)
+    result = run_bayesian(logs)
+    set_config(result.alpha, result.threshold)
+    print(f"Updated config: alpha={result.alpha}, threshold={result.threshold}")
 ```
 
 This prevents the optimizer from making wild guesses on insufficient data during the first 30 minutes or during low traffic periods.
@@ -354,12 +507,11 @@ Nothing is ever lost. If Redis evicts an entry it still lives in Postgres. Redis
 
 **Ground truth problem**
 
-The system cannot automatically label a cache hit as correct or incorrect in live traffic. Two mitigations:
+The system cannot automatically label a cache hit as correct or incorrect in real production traffic. Our mitigation:
 
-- Evaluation phase uses synthetic query pairs with known ground truth — trap pairs and paraphrase pairs where correct behavior is predefined
-- Production approximation uses a client retry heuristic — if the same client sends a similar query within 60 seconds of a cache hit, that hit is flagged as a probable false positive in telemetry
-
-Establishing reliable ground truth in production caching systems is an open research problem, acknowledged as a limitation in the writeup.
+- Testing uses a traffic simulator that sends queries with known `shouldHit` labels — paraphrase pairs and trap pairs where correct behavior is predefined
+- The `shouldHit` column is `null` for real traffic — the optimizer falls back to optimizing hit rate and latency alone, without false positive penalties
+- Establishing reliable ground truth in production caching systems is an open research problem, acknowledged as a limitation in the writeup
 
 **Why Bayesian optimization over a contextual bandit or EMA**
 
