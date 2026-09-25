@@ -30,6 +30,9 @@ model TelemetryLog {
   query           String
   cacheHit        Boolean
   similarityScore Float?
+  semanticScore   Float?
+  lexicalScore    Float?
+  shouldHit       Boolean?
   alphaUsed       Float
   thresholdUsed   Float
   latencyMs       Int
