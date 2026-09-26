@@ -14,8 +14,8 @@ def fetch_recent_logs(limit=200):
         conn = get_conn()
         cur = conn.cursor()
         cur.execute("""
-            SELECT "cacheHit", "similarityScore", "alphaUsed", "thresholdUsed", "latencyMs"
-            FROM "TelemetryLog"
+            SELECT "cacheHit", "semanticScore" , "lexicalScore" , "shouldHit" , "latencyMs"
+            FROM "telemetry_logs"
             ORDER BY "createdAt" DESC
             LIMIT %s
             """, (limit,))
