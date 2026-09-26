@@ -1,15 +1,31 @@
-def calculate_hit_rate(logs):
+def simulate_score(logs, alpha, threshold, penalty_weight=1.0):
     if not logs:
         return 0
-    hits = sum(1 for log in logs if log[0])
-    return hits / len(logs)
+    
+    hits = 0
+    false_positives = 0
+    total_latency = 0
 
-def calculate_avg_latency(logs):
-    if not logs:
-        return 0
-    return sum(log[4] for log in logs) / len(logs)
+    for cache_hit, semantic, lexical, should_hit, latency in logs:
+        if semantic is None or lexical is None:
+            continue
 
-def score_performance(logs):
-    hit_rate = calculate_hit_rate(logs)
-    avg_latency = calculate_avg_latency(logs)
-    return hit_rate - (avg_latency / 10000)
+        combined = alpha * semantic + (1 - alpha) * lexical
+        would_hit = combined >= threshold
+
+        if would_hit:
+            hits += 1
+
+            if should_hit is False:
+                false_positives += 1
+
+        total_latency += latency
+        
+    if hits == 0:
+        return -1
+
+    hit_rate = hits / len(logs)
+    fp_rate = false_positives / hits
+    avg_latency = total_latency / len(logs)
+
+    return hit_rate - (fp_rate * penalty_weight) - (avg_latency / 10000)
