@@ -7,7 +7,7 @@ import { getEmbedding } from './embedder.js';
 import { callGemini } from './gemini.js';
 
 export const cacheMiddleware = async (req, res, next) => {
-    const { query } = req.body;
+    const { query, shouldHit } = req.body;
     if (!query) return next();
 
     const start = Date.now();
@@ -15,17 +15,20 @@ export const cacheMiddleware = async (req, res, next) => {
 
     const exact = await checkExactMatch(query);
     if (exact) {
-        await logTelemetry({ query, cacheHit: true, similarityScore: null, alphaUsed: alpha, thresholdUsed: threshold, latencyMs: Date.now() - start });
+        await logTelemetry({ query, cacheHit: true, similarityScore: null, semanticScore: null, lexicalScore: null, shouldHit: shouldHit ?? null, alphaUsed: alpha, thresholdUsed: threshold, latencyMs: Date.now() - start });
         return res.json({ response: exact, source: 'exact' });
     }
 
     const embedding = await getEmbedding(query);
     const candidate = await searchSemantic(embedding);
 
+    let scores = null;
+
     if (candidate) {
-        const score = await hybridScore(query, candidate, alpha);
-        if (score >= threshold) {
-            await logTelemetry({ query, cacheHit: true, similarityScore: score, alphaUsed: alpha, thresholdUsed: threshold, latencyMs: Date.now() - start });
+        scores = hybridScore(query, candidate, alpha);
+
+        if (scores.combined >= threshold) {
+            await logTelemetry({ query, cacheHit: true, similarityScore: scores.combined, semanticScore: scores.semantic, lexicalScore: scores.lexical, shouldHit: shouldHit ?? null, alphaUsed: alpha, thresholdUsed: threshold, latencyMs: Date.now() - start });
             return res.json({ response: candidate.response, source: 'semantic' });
         }
     }
@@ -33,7 +36,7 @@ export const cacheMiddleware = async (req, res, next) => {
     const response = await callGemini(query);
     await storeExact(query, response);
     await storeSemantic(query, embedding, response);
-    await logTelemetry({ query, cacheHit: false, similarityScore: candidate?.score ?? null, alphaUsed: alpha, thresholdUsed: threshold, latencyMs: Date.now() - start });
+    await logTelemetry({ query, cacheHit: false, similarityScore: scores?.combined ?? null, semanticScore: scores?.semantic ?? null, lexicalScore: scores?.lexical ?? null, shouldHit: shouldHit ?? null, alphaUsed: alpha, thresholdUsed: threshold, latencyMs: Date.now() - start });
 
     return res.json({ response, source: 'llm' });
 };
