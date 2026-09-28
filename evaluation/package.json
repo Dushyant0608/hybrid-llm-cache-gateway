@@ -1,0 +1,13 @@
+{
+  "name": "evaluation",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "simulate": "node simulate_traffic.js",
+    "eval": "node run_eval.js"
+  },
+  "dependencies": {
+    "ioredis": "^6.0.0",
+    "pg": "^8.23.0"
+  }
+}
