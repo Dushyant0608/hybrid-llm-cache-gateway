@@ -1,0 +1,26 @@
+[
+    {
+        "pairs": [
+            "How do I start the server?",
+            "What's the command to launch the server?",
+            "Can you tell me how to boot up the server?"
+        ],
+        "shouldHit": true
+    },
+    {
+        "pairs": [
+            "How do I reset my password?",
+            "What's the process to change my password?",
+            "I forgot my password, how do I recover it?"
+        ],
+        "shouldHit": true
+    },
+    {
+        "pairs": [
+            "How do I install Node.js?",
+            "What's the setup process for Node.js?",
+            "Steps to get Node.js installed"
+        ],
+        "shouldHit": true
+    }
+]

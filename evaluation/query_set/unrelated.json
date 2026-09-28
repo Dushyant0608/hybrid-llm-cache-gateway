@@ -1,0 +1,23 @@
+[
+    {
+        "pairs": [
+            "How do I start the server?",
+            "What's the weather today?"
+        ],
+        "shouldHit": false
+    },
+    {
+        "pairs": [
+            "How do I reset my password?",
+            "What's the capital of France?"
+        ],
+        "shouldHit": false
+    },
+    {
+        "pairs": [
+            "How do I install Node.js?",
+            "Recommend me a good book"
+        ],
+        "shouldHit": false
+    }
+]

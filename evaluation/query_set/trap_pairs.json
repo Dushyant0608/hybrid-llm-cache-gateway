@@ -1,0 +1,30 @@
+[
+    {
+        "pairs": [
+            "Start the server",
+            "Stop the server"
+        ],
+        "shouldHit": false
+    },
+    {
+        "pairs": [
+            "Enable logging for this service",
+            "Disable logging for this service"
+        ],
+        "shouldHit": false
+    },
+    {
+        "pairs": [
+            "How do I connect to the database?",
+            "How do I disconnect from the database?"
+        ],
+        "shouldHit": false
+    },
+    {
+        "pairs": [
+            "Increase the memory limit",
+            "Decrease the memory limit"
+        ],
+        "shouldHit": false
+    }
+]
