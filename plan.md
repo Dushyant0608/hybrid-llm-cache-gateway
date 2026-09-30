@@ -234,19 +234,19 @@ hybrid-llm-cache-gateway/
 │   │   │   ├── exactMatch.js         ✅ Redis L1 exact match check
 │   │   │   ├── semanticSearch.js     ✅ pgvector cosine similarity search + store
 │   │   │   ├── lexicalScorer.js      ✅ Weighted Jaccard similarity
-│   │   │   ├── hybridScorer.js       🔧 Returns raw semantic + lexical alongside blended score
+│   │   │   ├── hybridScorer.js       ✅ Returns raw semantic + lexical alongside blended score
 │   │   │   ├── embedder.js           ✅ HTTP client → Python embedder
 │   │   │   └── gemini.js             ✅ Gemini API call on cache miss
 │   │   ├── service/
 │   │   │   ├── redis.js              ✅ ioredis client + config reader/writer
-│   │   │   ├── telemetry.js          🔧 Updated to accept semanticScore, lexicalScore, shouldHit
+│   │   │   ├── telemetry.js          ✅ Accepts semanticScore, lexicalScore, shouldHit
 │   │   │   └── prisma.js             ✅ Prisma client setup
 │   │   └── config/
 │   │       └── default.js            ✅ Cold start α and threshold init
 │   ├── prisma/
-│   │   ├── schema.prisma             🔧 Add semanticScore, lexicalScore, shouldHit columns
+│   │   ├── schema.prisma             ✅ semanticScore, lexicalScore, shouldHit columns added
 │   │   ├── prisma7.config.ts         ✅
-│   │   └── migrations/               🔧 New migration needed
+│   │   └── migrations/               ✅ Migration applied
 │   ├── app.js                        ✅ Express app setup
 │   ├── server.js                     ✅ Entry point + initConfig
 │   └── package.json                  ✅
@@ -255,23 +255,23 @@ hybrid-llm-cache-gateway/
 │   ├── embedder.py                   ✅ MiniLM-L6 HTTP server (FastAPI)
 │   ├── db.py                         ✅ Postgres connection + telemetry queries (bug-fixed)
 │   ├── redis_client.py               ✅ Redis connection + config read/write (bug-fixed)
-│   ├── scorer.py                     🔧 Rework: re-simulate with candidate params + shouldHit FP rate
-│   ├── bayesian.py                   ⬜ gp_minimize wrapper with proper objective function
-│   ├── worker.py                     ⬜ Ties it all together on 30-min loop
+│   ├── scorer.py                     ✅ Re-simulates with candidate params + shouldHit FP rate
+│   ├── bayesian.py                   ✅ gp_minimize wrapper with proper objective function
+│   ├── worker.py                     ✅ 30-min loop with min-30 log guard
 │   └── requirements.txt              ✅
 │
 ├── evaluation/                       # Fabricated traffic testing
 │   ├── query_set/
-│   │   ├── paraphrases.json          ⬜ Same meaning, different words (shouldHit: true)
-│   │   ├── trap_pairs.json           ⬜ Similar topic, opposite meaning (shouldHit: false)
-│   │   └── unrelated.json            ⬜ Completely different topics (shouldHit: false)
-│   ├── simulate_traffic.js           ⬜ Sends labeled queries to gateway over time
-│   ├── run_eval.js                   ⬜ Three-config comparison (Baseline vs Fixed vs Adaptive)
-│   └── results/                      ⬜ Output CSVs and charts
+│   │   ├── paraphrases.json          ✅ Same meaning, different words (shouldHit: true)
+│   │   ├── trap_pairs.json           ✅ Similar topic, opposite meaning (shouldHit: false)
+│   │   └── unrelated.json            ✅ Completely different topics (shouldHit: false)
+│   ├── simulate_traffic.js           ✅ Sends labeled queries to gateway over time
+│   ├── run_eval.js                   ✅ Three-config comparison (Baseline vs Fixed vs Adaptive)
+│   └── results/                      ⬜ Output from actual eval run
 │
 ├── demo-app/                         # Minimal demo
-│   ├── index.js                      ⬜ Simple Express app routing through gateway
-│   └── package.json                  ⬜
+│   ├── server.js                     ✅ Express app routing through gateway (bug-fixed)
+│   └── package.json                  ✅
 │
 ├── docker-compose.yml                ✅ Postgres (pgvector) + Redis
 ├── .env                              ✅
@@ -317,6 +317,12 @@ Added `shouldHit` boolean column to `TelemetryLog` — carries the expected corr
 
 Instead of testing on real production traffic (where ground truth is unknowable), the system is tested with a traffic simulator (`simulate_traffic.js`) that sends queries with known `shouldHit` labels. The system is built production-ready, but validated with controlled fabricated traffic.
 
+### Bug fixed in demo-app (Sep 30, 2026)
+
+| File | Bug | Fix |
+|------|-----|-----|
+| `demo-app/server.js` | `fetch()` and `.json()` missing `await` — response data was always undefined | Added `await` to both async calls |
+
 ---
 
 ## Build Strategy (Updated)
@@ -346,7 +352,7 @@ Instead of testing on real production traffic (where ground truth is unknowable)
 
 ---
 
-### Phase 4 — Schema + telemetry updates ⬜ NEXT
+### Phase 4 — Schema + telemetry updates ✅ DONE
 Update the gateway to log raw scores and ground truth labels.
 
 **4a. Schema migration**
@@ -365,7 +371,7 @@ Update the gateway to log raw scores and ground truth labels.
 
 ---
 
-### Phase 5 — Optimizer (Python worker) ⬜
+### Phase 5 — Optimizer (Python worker) ✅ DONE
 Build the Bayesian optimization loop with the correct objective function.
 
 **5a. Update existing files**
@@ -380,7 +386,7 @@ Build the Bayesian optimization loop with the correct objective function.
 
 ---
 
-### Phase 6 — Fabricated traffic + evaluation ⬜
+### Phase 6 — Fabricated traffic + evaluation 🔧 CODE DONE — NEEDS ACTUAL RUN
 Build the traffic simulator and run the three-config comparison.
 
 **6a. Query sets**
@@ -399,7 +405,7 @@ Build the traffic simulator and run the three-config comparison.
 
 ---
 
-### Phase 7 — Demo app + writeup ⬜
+### Phase 7 — Demo app + writeup 🔧 DEMO DONE — NEEDS WRITEUP
 - `demo-app/` — minimal Express app that routes through the gateway
 - README with architecture diagram and setup instructions
 - Mini paper structure: Abstract, Problem, Related Work, System Design, Evaluation, Conclusion
