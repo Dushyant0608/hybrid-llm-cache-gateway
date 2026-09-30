@@ -12,12 +12,12 @@ app.post('/ask', async (req, res) => {
     if (!message) return res.status(400).json({ error: 'message required' });
 
     try {
-        const r = fetch(GATEWAY, {
+        const r = await fetch(GATEWAY, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ query: message })
         });
-        const data = r.json();
+        const data = await r.json();
         res.json({ answer: data.response, source: data.source });
     } catch (e) {
         res.status(502).json({ error: 'gateway unreachable' });
