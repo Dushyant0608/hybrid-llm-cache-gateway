@@ -22,5 +22,53 @@
             "Steps to get Node.js installed"
         ],
         "shouldHit": true
+    },
+    {
+        "pairs": [
+            "How do I connect to Postgres?",
+            "What's the command to connect to the database?",
+            "Steps to establish a database connection"
+        ],
+        "shouldHit": true
+    },
+    {
+        "pairs": [
+            "How do I deploy this app?",
+            "What's the deployment process?",
+            "Steps to get this live in production"
+        ],
+        "shouldHit": true
+    },
+    {
+        "pairs": [
+            "How do I check memory usage?",
+            "What's the command to see memory consumption?",
+            "How can I monitor RAM usage"
+        ],
+        "shouldHit": true
+    },
+    {
+        "pairs": [
+            "How do I clear the cache?",
+            "What's the way to flush the cache?",
+            "Command to empty the cache"
+        ],
+        "shouldHit": true
+    },
+    {
+        "pairs": [
+            "How do I create a new branch in git?",
+            "What's the command to make a new git branch?",
+            "Steps to create a branch"
+        ],
+        "shouldHit": true
+    },
+    {
+        "pairs": [
+            "How do I check server logs?",
+            "What's the command to view the logs?",
+            "Where can I see the server's logs"
+        ],
+        "shouldHit": true
     }
 ]

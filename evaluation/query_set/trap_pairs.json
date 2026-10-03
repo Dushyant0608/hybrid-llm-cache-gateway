@@ -26,5 +26,33 @@
             "Decrease the memory limit"
         ],
         "shouldHit": false
+    },
+    {
+        "pairs": [
+            "Grant access to this user",
+            "Revoke access from this user"
+        ],
+        "shouldHit": false
+    },
+    {
+        "pairs": [
+            "Lock the account",
+            "Unlock the account"
+        ],
+        "shouldHit": false
+    },
+    {
+        "pairs": [
+            "Deploy the new version",
+            "Roll back the new version"
+        ],
+        "shouldHit": false
+    },
+    {
+        "pairs": [
+            "Mute notifications for this channel",
+            "Unmute notifications for this channel"
+        ],
+        "shouldHit": false
     }
 ]

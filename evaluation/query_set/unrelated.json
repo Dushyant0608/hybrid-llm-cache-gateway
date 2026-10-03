@@ -19,5 +19,33 @@
             "Recommend me a good book"
         ],
         "shouldHit": false
+    },
+    {
+        "pairs": [
+            "How do I deploy this app?",
+            "What's your favorite movie?"
+        ],
+        "shouldHit": false
+    },
+    {
+        "pairs": [
+            "How do I check memory usage?",
+            "Tell me a joke"
+        ],
+        "shouldHit": false
+    },
+    {
+        "pairs": [
+            "How do I clear the cache?",
+            "What time is it in Tokyo?"
+        ],
+        "shouldHit": false
+    },
+    {
+        "pairs": [
+            "How do I create a new branch in git?",
+            "Suggest a good restaurant nearby"
+        ],
+        "shouldHit": false
     }
 ]
