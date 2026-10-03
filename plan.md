@@ -533,6 +533,60 @@ MiniLM-L6 runs locally at 3-5ms — this concern does not apply. If an external 
 
 ---
 
+## Local End-to-End Testing (Oct 3, 2026)
+
+With all phases built, the system was run end to end for the first time across all local services: Docker (Postgres + Redis), `embedder.py` (FastAPI), `gateway/server.js`, and `demo-app/server.js`.
+
+### Bugs found and fixed during first integration run
+
+| Issue | Root cause | Fix |
+|---|---|---|
+| Embedder failed to bind to port 5000 | Port already in use by a prior process | Moved embedder to port 5050, updated `embedder.js` fetch URL to match |
+| `password authentication failed for user "postgres"` | `.env` `DATABASE_URL` used a hardcoded user that didn't match `POSTGRES_USER` | Verified `.env` consistency; required a full `docker-compose down -v` to force Postgres to reinitialize with current `.env` values, since Postgres only applies `POSTGRES_USER`/`PASSWORD`/`DB` on first container init with an empty volume |
+| `relation "cached_responses" does not exist` | Volume wipe reset the database with no schema applied | Reran `npx prisma migrate dev` to reapply all migrations |
+| `models/gemini-1.5-flash is not found` | Model deprecated by Google since the integration was first coded | Updated to `gemini-2.5-flash` |
+| `gemini-2.5-flash is no longer available to new users` | Model further deprecated; error response explicitly named the replacement | Updated to `gemini-3.8-flash` |
+| `Unknown argument semanticScore` in Prisma Client | `npx prisma migrate dev` was originally run from the wrong working directory and silently failed before the schema fix in Phase 4 was ever applied as a real migration | Ran `npx prisma generate` to regenerate Prisma Client against the already-correct schema, then restarted the gateway process to load the new client |
+| API key exposed in terminal output pasted into chat | n/a (operational mistake, not a code bug) | Key rotated immediately in Google AI Studio |
+
+### Core pipeline verification
+
+All three cache decision paths were directly observed working, confirmed via live requests and cross-checked against `telemetry_logs`:
+
+- **Exact match (`source: exact`)** — repeat identical query served instantly from Redis
+- **Cache miss (`source: llm`)** — new query correctly routed to Gemini, response stored in both Redis and Postgres
+- **Semantic hit (`source: semantic`)** — a reworded paraphrase ("What city is Germanys capital city?") correctly matched a previously cached entry via pgvector + hybrid scoring, with no exact string match involved
+
+A near-miss case was also captured directly in telemetry, confirming the hybrid formula is implemented correctly and demonstrating the exact problem the project's Bayesian optimizer exists to solve:
+
+query: "Which city is the capital of Germany?"
+semanticScore: 0.9379
+lexicalScore: 0.625
+similarityScore: 0.8440 (= 0.7 × 0.9379 + 0.3 × 0.625)
+thresholdUsed: 0.85
+cacheHit: false
+
+
+The blended score missed the fixed 0.85 threshold by 0.006 despite the semantic signal being very high — confirming that a static threshold under-caches legitimate paraphrases, and that the lexical component, not just the semantic one, materially affects real decisions.
+
+A manual sanity check (temporarily lowering `cache:config` threshold to 0.80 via `redis-cli`) confirmed the gateway reads config live from Redis on every request, with no restart or caching delay — validating the hot-reload design the Bayesian optimizer depends on.
+
+A case found during testing (not from the planned trap_pairs set) provides direct empirical evidence for the project's core thesis:
+
+query: "Germany is the capital of what city?"
+semanticScore: 0.9851
+lexicalScore:  0.4444
+similarityScore: 0.8229   (= 0.7 × 0.9851 + 0.3 × 0.4444)
+thresholdUsed: 0.85
+cacheHit: false
+
+Semantic similarity alone (0.985) would have classified this as a near-identical match to a previously cached query under pure semantic caching (α = 1.0, the Baseline config) — likely returning an incorrect cached answer. The lexical component pulled the blended score down to 0.823, correctly keeping it below threshold. This is a real, unplanned confirmation of the false-positive failure mode described in the Research Gap section, caught by the hybrid formula exactly as designed.
+
+### Still to verify
+
+- `worker.py` — optimizer loop has not yet been run against accumulated telemetry to confirm it actually updates Redis config based on real data
+- `evaluation/simulate_traffic.js` and `evaluation/run_eval.js` — written but not yet executed; `evaluation/results/` is still empty
+
 ## Hosting Strategy
 
 **Local development**
