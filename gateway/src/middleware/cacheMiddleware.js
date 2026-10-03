@@ -4,7 +4,7 @@ import { searchSemantic, storeSemantic } from './semanticSearch.js';
 import { hybridScore } from './hybridScorer.js';
 import { logTelemetry } from '../service/telemetry.js';
 import { getEmbedding } from './embedder.js';
-import { callGemini } from './gemini.js';
+import { callGemini } from './llm.js';
 
 export const cacheMiddleware = async (req, res, next) => {
     const { query, shouldHit } = req.body;
