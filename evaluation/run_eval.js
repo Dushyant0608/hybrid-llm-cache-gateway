@@ -52,8 +52,11 @@ const runAllPairs = async (paraphrases, trapPairs, unrelated) => {
     const results = [];
 
     for (const group of paraphrases) {
-        for (const query of group.pairs) {
-            results.push(await sendQuery(query, group.shouldHit));
+        for (let i = 0; i < group.pairs.length; i++) {
+            const query = group.pairs[i];
+            // First query seeds the cache — no prior entry to match, so shouldHit is unknown
+            const label = i === 0 ? null : group.shouldHit;
+            results.push(await sendQuery(query, label));
             await sleep(DELAY_MS);
         }
     }

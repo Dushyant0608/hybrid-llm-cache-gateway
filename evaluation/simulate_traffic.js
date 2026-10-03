@@ -23,8 +23,11 @@ const sendQuery = async (query, shouldHit) => {
 
 const runParaphrases = async (groups) => {
     for (const group of groups){
-        for(const query of group.pairs){
-            await sendQuery(query, group.shouldHit);
+        for(let i = 0; i < group.pairs.length; i++){
+            const query = group.pairs[i];
+            // First query seeds the cache — no prior entry to match, so shouldHit is unknown
+            const label = i === 0 ? null : group.shouldHit;
+            await sendQuery(query, label);
             await sleep(DELAY_MS);
         }
     }
