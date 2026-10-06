@@ -5,7 +5,7 @@ from dotenv import load_dotenv
 
 load_dotenv("../.env")
 
-r = redis.Redis.from_url(os.getenv("REDIS_URL", "redis://localhost:6379"))
+r = redis.Redis.from_url(os.getenv("REDIS_URL", "redis://localhost:6379"), protocol=2)
 
 def get_config():
     data = r.get("cache:config")
