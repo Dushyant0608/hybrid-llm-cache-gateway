@@ -28,6 +28,7 @@ model CachedResponse {
 model TelemetryLog {
   id              String   @id @default(uuid())
   query           String
+  candidateQuery  String?
   cacheHit        Boolean
   similarityScore Float?
   semanticScore   Float?
