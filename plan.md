@@ -677,3 +677,57 @@ GEMINI_API_KEY=your_key
 ```
 
 Same codebase, different environment variables.
+
+## Optimizer Validation and Honest Findings (Oct 4, 2026)
+
+### Infrastructure changes during this session
+
+**LLM provider switched from Gemini to Groq.** Gemini's free tier proved too unreliable for repeated testing — `gemini-1.5-flash` and `gemini-2.5-flash` were both deprecated mid-project, and even after updating to `gemini-3.8-flash`, sustained testing (~57 queries via `simulate_traffic.js`) triggered consistent 503 "high demand" errors that retry/backoff logic could not resolve. Switched to Groq (`openai/gpt-oss-20b`, confirmed available on the account's free tier after `llama-3.1-8b-instant` and `llama-3.3-70b-versatile` returned 404s as gated/paid-tier-only models). The `callGemini` function name was kept unchanged in `cacheMiddleware.js` to avoid touching the call site — only `gemini.js`'s internals changed.
+
+**`redis-client.py` required `protocol=2`** — `redis-py` v5+ attempts a `HELLO` handshake for RESP3 by default, which the project's `redis:7-alpine` container does not support. Fixed by forcing RESP2 explicitly in the client constructor.
+
+### Traffic simulation
+
+`evaluation/simulate_traffic.js` was run against an expanded query set (57 total pairs across paraphrases, trap pairs, and unrelated categories — expanded from the original ~23 to clear the optimizer's `MIN_LOGS = 30` guard with margin). `sendQuery` was made resilient (try/catch, log-and-continue on failure) after early runs crashed entirely on a single transient error. Final telemetry count: 88 logged rows.
+
+### Optimizer trajectory logging added
+
+`bayesian.py` was updated to print every `gp_minimize` trial (`alpha`, `threshold`, `score`) plus a final summary, so the optimizer's search behavior is auditable rather than a black box producing only a final answer.
+
+### Bug found and fixed: zero-hit exploit in the objective function
+
+**Problem:** `scorer.py`'s `simulate_score` originally returned `-1` when a candidate `(alpha, threshold)` produced zero cache hits. At higher `penalty_weight` values, this made "cache nothing" a rational escape hatch for the optimizer — multiple trials at `penalty_weight=3.0` converged on thresholds near 0.88-0.93 that hit nothing at all, scoring `-1.0000` (better than several real-hit configs at that penalty weight), rather than genuinely searching the space for a good real tradeoff.
+
+**Fix:** changed the zero-hit penalty from `-1` to `-5`, ensuring it is always worse than any plausible real-hit outcome, forcing the optimizer to only explore configurations that actually cache.
+
+### Core finding: the hybrid mechanism is validated at the individual-decision level
+
+Direct telemetry inspection of a trap pair confirms the hybrid formula works exactly as designed:
+
+Cached: "Increase the memory limit"
+Query: "Decrease the memory limit"
+semanticScore: 0.9386
+lexicalScore: 0.6000
+
+Pure semantic (alpha=1.0): 0.9386 >= 0.79 -> HIT (false positive)
+Hybrid default (alpha=0.7): 0.837 < 0.85 -> MISS (correctly avoided)
+
+
+This is a real, reproducible case — on the actual deployed stack, not a simulation — where pure semantic caching would have served a wrong cached answer, and the hybrid formula's lexical term prevented it. This directly validates the mechanism described in the Research Gap section.
+
+### Open tension: the Bayesian optimizer's aggregate result currently favors alpha close to 1.0
+
+Running `gp_minimize` against the 88-row dataset, with the zero-hit bug fixed and `penalty_weight=3.0`, consistently converged toward `alpha ≈ 1.0` (best trial: alpha=1.0, threshold=0.79) rather than toward a lower alpha that would better protect against trap-pair false positives.
+
+This does not contradict the per-decision finding above — it reflects a separate, real limitation in the current setup:
+
+1. **Small dataset** — 88 total logged requests, a meaningfully smaller fraction of which are usable for scoring (exact matches are excluded from `simulate_score` since they have no semantic/lexical components). Too few trap-pair cases relative to paraphrase cases for the optimizer to reliably learn to protect against them.
+2. **Lexical scorer lacks stopword filtering** — `lexicalScorer.js` is unweighted raw Jaccard. Short imperative queries that differ by only one keyword (e.g. "increase"/"decrease") can still retain meaningful lexical overlap from shared structural words, diluting the lexical signal's discriminating power.
+3. **Objective function treats all false positives uniformly** — a flat `penalty_weight` does not distinguish a costly wrong-answer false positive from a lower-stakes one, and the current aggregate hit-rate-vs-fp-rate tradeoff can net-favor a high-hit-rate, higher-fp-rate configuration even when specific failures (like the memory limit example above) are demonstrably preventable.
+
+### Next steps (planned for next session)
+
+- Add stopword filtering (or move to BM25/TF-IDF weighting) in `lexicalScorer.js` to sharpen the lexical signal on short structurally-similar queries, and re-run the optimizer to see whether this shifts the converged alpha away from 1.0
+- Expand the trap pair and paraphrase query sets further to give the optimizer a larger, more balanced sample
+- Consider category-aware penalty weighting (weighting trap-pair-derived false positives more heavily than generic ones) as a possible refinement to the objective function
+- Re-run `run_eval.js`'s three/four-config comparison only after the above is addressed, so the "Hybrid Adaptive" result reflects a genuinely improved search rather than the current aggregate-level tension
