@@ -26,18 +26,20 @@ model CachedResponse {
 }
 
 model TelemetryLog {
-  id              String   @id @default(uuid())
-  query           String
-  candidateQuery  String?
-  cacheHit        Boolean
-  similarityScore Float?
-  semanticScore   Float?
-  lexicalScore    Float?
-  shouldHit       Boolean?
-  alphaUsed       Float
-  thresholdUsed   Float
-  latencyMs       Int
-  createdAt       DateTime @default(now())
+  id                    String   @id @default(uuid())
+  query                 String
+  cacheHit              Boolean
+  decisionPath          String
+  candidateQuery        String?
+  semanticScore         Float?
+  nliContradictionScore Float?
+  nliEntailmentScore    Float?
+  shouldHit             Boolean?
+  lowCutoffUsed         Float
+  nliThresholdUsed      Float
+  latencyMs             Int
+  verifierLatencyMs     Int?
+  createdAt             DateTime @default(now())
 
   @@map("telemetry_logs")
 }
