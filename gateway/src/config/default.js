@@ -1,6 +1,6 @@
 import { getConfig, setConfig } from "../service/redis.js";
 
-const DEFAULTS = { alpha : 0.7 , threshold : 0.85 };
+const DEFAULTS = { mode: 'veto', lowCutoff: 0.5, nliThreshold: 0.5, baselineThreshold: 0.85 };
 
 export const initConfig = async () => {
     const existing = await getConfig();
