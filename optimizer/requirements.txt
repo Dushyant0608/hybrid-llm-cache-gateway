@@ -1,8 +1,4 @@
-fastapi 
+fastapi
 uvicorn
 sentence-transformers
 torch
-scikit-optimize
-psycopg2-binary
-redis
-python-dotenv
