@@ -4,7 +4,8 @@
             "Start the server",
             "Stop the server"
         ],
-        "shouldHit": false
+        "shouldHit": false,
+        "firstLabel": true
     },
     {
         "pairs": [
@@ -18,7 +19,8 @@
             "How do I connect to the database?",
             "How do I disconnect from the database?"
         ],
-        "shouldHit": false
+        "shouldHit": false,
+        "firstLabel": true
     },
     {
         "pairs": [
@@ -46,7 +48,8 @@
             "Deploy the new version",
             "Roll back the new version"
         ],
-        "shouldHit": false
+        "shouldHit": false,
+        "firstLabel": null
     },
     {
         "pairs": [
