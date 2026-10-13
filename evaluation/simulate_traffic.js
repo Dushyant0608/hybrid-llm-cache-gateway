@@ -28,19 +28,18 @@ const sendQuery = async (query, shouldHit) => {
 const runParaphrases = async (groups) => {
     for (const group of groups) {
         for (let i = 0; i < group.pairs.length; i++) {
-            const query = group.pairs[i];
-            // First query seeds the cache — no prior entry to match, so shouldHit is unknown
-            const label = i === 0 ? null : group.shouldHit;
-            await sendQuery(query, label);
+            const label = i === 0 ? false : group.shouldHit;
+            await sendQuery(group.pairs[i], label);
             await sleep(DELAY_MS);
         }
     }
 };
 
-const runPairs = async (groups) => {
+const runPairs = async (groups, defFirst) => {
     for (const group of groups) {
         const [first, second] = group.pairs;
-        await sendQuery(first, true);
+        const fl = group.firstLabel !== undefined ? group.firstLabel : defFirst;
+        await sendQuery(first, fl);
         await sleep(DELAY_MS);
         await sendQuery(second, group.shouldHit);
         await sleep(DELAY_MS);
@@ -56,10 +55,10 @@ const main = async () => {
     await runParaphrases(paraphrases);
 
     console.log('running trap pairs');
-    await runPairs(trapPairs);
+    await runPairs(trapPairs, false);
 
     console.log('running unrelated');
-    await runPairs(unrelated);
+    await runPairs(unrelated, true);
 
     console.log('done');
 };

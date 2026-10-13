@@ -1,7 +1,5 @@
 import { prisma } from '../service/prisma.js';
 
-export const logTelemetry = async ({ query, cacheHit, semanticScore, lexicalScore, similarityScore, shouldHit, alphaUsed, thresholdUsed, latencyMs }) => {
-    await prisma.telemetryLog.create({
-        data: { query, cacheHit, semanticScore, lexicalScore, similarityScore, shouldHit, alphaUsed, thresholdUsed, latencyMs }
-    });
+export const logTelemetry = async (data) => {
+    await prisma.telemetryLog.create({ data });
 };

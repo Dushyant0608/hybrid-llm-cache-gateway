@@ -12,22 +12,18 @@ const GATEWAY_URL = 'http://localhost:3000/v1/query';
 const DELAY_MS = 300;
 
 const CONFIGS = {
-    baseline: { alpha: 1.0, threshold: 0.85 },
-    hybridFixed: { alpha: 0.7, threshold: 0.85 },
-    hybridAdaptive: null
+    baseline: { mode: 'baseline', baselineThreshold: 0.85, lowCutoff: 0.5, nliThreshold: 0.5 },
+    nliVeto: { mode: 'veto', lowCutoff: 0.6, nliThreshold: 0.5, baselineThreshold: 0.85 }
 };
 
 const flushCaches = async () => {
-    // Flush Redis (exact-match + semantic search caches)
     await redis.flushdb();
-    // Truncate cached_responses in Postgres (keeps telemetry_logs intact)
     const client = new Client({ connectionString: process.env.DATABASE_URL });
     await client.connect();
     await client.query('TRUNCATE "cached_responses"');
     await client.end();
     console.log('  [flush] Redis + CachedResponse cleared');
 };
-
 
 const loadQuerySet = (file) => {
     const data = fs.readFileSync(path.join('./query_set', file), 'utf-8');
@@ -54,20 +50,25 @@ const runAllPairs = async (paraphrases, trapPairs, unrelated) => {
     for (const group of paraphrases) {
         for (let i = 0; i < group.pairs.length; i++) {
             const query = group.pairs[i];
-            // First query seeds the cache — no prior entry to match, so shouldHit is unknown
             const label = i === 0 ? null : group.shouldHit;
             results.push(await sendQuery(query, label));
             await sleep(DELAY_MS);
         }
     }
 
-    for (const group of [...trapPairs, ...unrelated]) {
-        const [first, second] = group.pairs;
-        results.push(await sendQuery(first, true));
-        await sleep(DELAY_MS);
-        results.push(await sendQuery(second, group.shouldHit));
-        await sleep(DELAY_MS);
-    }
+    const runGroup = async (groups, defFirst) => {
+        for (const group of groups) {
+            const [first, second] = group.pairs;
+            const firstLabel = group.firstLabel !== undefined ? group.firstLabel : defFirst;
+            results.push(await sendQuery(first, firstLabel));
+            await sleep(DELAY_MS);
+            results.push(await sendQuery(second, group.shouldHit));
+            await sleep(DELAY_MS);
+        }
+    };
+
+    await runGroup(trapPairs, false);
+    await runGroup(unrelated, true);
 
     return results;
 };
@@ -88,13 +89,11 @@ const computeMetrics = (results) => {
 const runConfig = async (name, config, querySets) => {
     console.log(`\nrunning config: ${name}`);
 
-    // Start each config run with a clean cache for fair comparison
     await flushCaches();
 
     if (config) {
         await redis.set('cache:config', JSON.stringify(config));
     }
-
 
     const results = await runAllPairs(...querySets);
     const metrics = computeMetrics(results);

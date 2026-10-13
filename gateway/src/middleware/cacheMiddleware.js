@@ -1,42 +1,86 @@
-import { get, set, getConfig } from '../service/redis.js';
+import { getConfig } from '../service/redis.js';
 import { checkExactMatch, storeExact } from './exactMatch.js';
 import { searchSemantic, storeSemantic } from './semanticSearch.js';
-import { hybridScore } from './hybridScorer.js';
+import { verify } from './verifier.js';
 import { logTelemetry } from '../service/telemetry.js';
 import { getEmbedding } from './embedder.js';
-import { callGemini } from './llm.js';
+import { callLLM } from './llm.js';
+
+const logBase = (query, shouldHit, cfg, latencyMs, extra) => ({
+    query,
+    shouldHit: shouldHit ?? null,
+    lowCutoffUsed: cfg.lowCutoff,
+    nliThresholdUsed: cfg.nliThreshold,
+    latencyMs,
+    candidateQuery: null,
+    semanticScore: null,
+    nliContradictionScore: null,
+    nliEntailmentScore: null,
+    verifierLatencyMs: null,
+    ...extra
+});
 
 export const cacheMiddleware = async (req, res, next) => {
     const { query, shouldHit } = req.body;
     if (!query) return next();
 
     const start = Date.now();
-    const { alpha, threshold } = await getConfig();
+    const cfg = await getConfig();
+    const mode = cfg.mode || 'veto';
 
     const exact = await checkExactMatch(query);
     if (exact) {
-        await logTelemetry({ query, cacheHit: true, similarityScore: null, semanticScore: null, lexicalScore: null, shouldHit: shouldHit ?? null, alphaUsed: alpha, thresholdUsed: threshold, latencyMs: Date.now() - start });
+        await logTelemetry(logBase(query, shouldHit, cfg, Date.now() - start, {
+            cacheHit: true, decisionPath: 'exact'
+        }));
         return res.json({ response: exact, source: 'exact' });
     }
 
     const embedding = await getEmbedding(query);
     const candidate = await searchSemantic(embedding);
 
-    let scores = null;
+    let decisionPath = 'no_candidate';
+    let nli = null;
+    let verifierMs = null;
 
-    if (candidate) {
-        scores = hybridScore(query, candidate, alpha);
-
-        if (scores.combined >= threshold) {
-            await logTelemetry({ query, cacheHit: true, similarityScore: scores.combined, semanticScore: scores.semantic, lexicalScore: scores.lexical, shouldHit: shouldHit ?? null, alphaUsed: alpha, thresholdUsed: threshold, latencyMs: Date.now() - start });
-            return res.json({ response: candidate.response, source: 'semantic' });
-        }
+    if (candidate && mode === 'baseline') {
+        decisionPath = candidate.score >= cfg.baselineThreshold ? 'hit' : 'below_threshold';
+    } else if (candidate && candidate.score >= cfg.lowCutoff) {
+        const vStart = Date.now();
+        nli = await verify(query, candidate.query);
+        verifierMs = Date.now() - vStart;
+        decisionPath = nli.contradiction >= cfg.nliThreshold ? 'vetoed' : 'hit';
+    } else if (candidate) {
+        decisionPath = 'below_cutoff';
     }
 
-    const response = await callGemini(query);
+    if (decisionPath === 'hit') {
+        await logTelemetry(logBase(query, shouldHit, cfg, Date.now() - start, {
+            cacheHit: true, decisionPath, candidateQuery: candidate.query,
+            semanticScore: candidate.score, nliContradictionScore: nli?.contradiction ?? null,
+            nliEntailmentScore: nli?.entailment ?? null, verifierLatencyMs: verifierMs
+        }));
+        return res.json({ response: candidate.response, source: 'semantic' });
+    }
+
+
+
+    let response;
+    try {
+        response = await callLLM(query);
+    } catch (e) {
+        console.error('llm failed:', e.message);
+        return res.status(502).json({ error: 'llm_failed' });
+    }
+
+
     await storeExact(query, response);
     await storeSemantic(query, embedding, response);
-    await logTelemetry({ query, cacheHit: false, similarityScore: scores?.combined ?? null, semanticScore: scores?.semantic ?? null, lexicalScore: scores?.lexical ?? null, shouldHit: shouldHit ?? null, alphaUsed: alpha, thresholdUsed: threshold, latencyMs: Date.now() - start });
+    await logTelemetry(logBase(query, shouldHit, cfg, Date.now() - start, {
+        cacheHit: false, decisionPath, candidateQuery: candidate?.query ?? null,
+        semanticScore: candidate?.score ?? null, nliContradictionScore: nli?.contradiction ?? null,
+        nliEntailmentScore: nli?.entailment ?? null, verifierLatencyMs: verifierMs
+    }));
 
     return res.json({ response, source: 'llm' });
 };
