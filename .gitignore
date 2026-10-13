@@ -1,4 +1,4 @@
 .env
 node_modules
 /generated/prisma
-/optimizer/__pycache__
+/ml-service/__pycache__
