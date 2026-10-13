@@ -1,0 +1,834 @@
+[
+  {
+    "name": "baseline",
+    "config": {
+      "mode": "baseline",
+      "baselineThreshold": 0.85,
+      "lowCutoff": 0.5,
+      "nliThreshold": 0.5
+    },
+    "metrics": {
+      "total": 57,
+      "hitRate": 0.2807017543859649,
+      "fpRate": 0.125,
+      "avgLatencyMs": 2915
+    },
+    "results": [
+      {
+        "query": "How do I start the server?",
+        "shouldHit": null,
+        "cacheHit": false,
+        "source": "llm",
+        "latency": 1197
+      },
+      {
+        "query": "What's the command to launch the server?",
+        "shouldHit": true,
+        "cacheHit": false,
+        "source": "llm",
+        "latency": 643
+      },
+      {
+        "query": "Can you tell me how to boot up the server?",
+        "shouldHit": true,
+        "cacheHit": false,
+        "source": "llm",
+        "latency": 1317
+      },
+      {
+        "query": "How do I reset my password?",
+        "shouldHit": null,
+        "cacheHit": false,
+        "source": "llm",
+        "latency": 1425
+      },
+      {
+        "query": "What's the process to change my password?",
+        "shouldHit": true,
+        "cacheHit": false,
+        "source": "llm",
+        "latency": 1144
+      },
+      {
+        "query": "I forgot my password, how do I recover it?",
+        "shouldHit": true,
+        "cacheHit": false,
+        "source": "llm",
+        "latency": 972
+      },
+      {
+        "query": "How do I install Node.js?",
+        "shouldHit": null,
+        "cacheHit": false,
+        "source": "llm",
+        "latency": 1604
+      },
+      {
+        "query": "What's the setup process for Node.js?",
+        "shouldHit": true,
+        "cacheHit": false,
+        "source": "llm",
+        "latency": 1359
+      },
+      {
+        "query": "Steps to get Node.js installed",
+        "shouldHit": true,
+        "cacheHit": true,
+        "source": "semantic",
+        "latency": 34
+      },
+      {
+        "query": "How do I connect to Postgres?",
+        "shouldHit": null,
+        "cacheHit": false,
+        "source": "llm",
+        "latency": 1441
+      },
+      {
+        "query": "What's the command to connect to the database?",
+        "shouldHit": true,
+        "cacheHit": false,
+        "source": "llm",
+        "latency": 1066
+      },
+      {
+        "query": "Steps to establish a database connection",
+        "shouldHit": true,
+        "cacheHit": false,
+        "source": "llm",
+        "latency": 2099
+      },
+      {
+        "query": "How do I deploy this app?",
+        "shouldHit": null,
+        "cacheHit": false,
+        "source": "llm",
+        "latency": 2417
+      },
+      {
+        "query": "What's the deployment process?",
+        "shouldHit": true,
+        "cacheHit": false,
+        "source": "llm",
+        "latency": 13609
+      },
+      {
+        "query": "Steps to get this live in production",
+        "shouldHit": true,
+        "cacheHit": false,
+        "source": "llm",
+        "latency": 14494
+      },
+      {
+        "query": "How do I check memory usage?",
+        "shouldHit": null,
+        "cacheHit": false,
+        "source": "llm",
+        "latency": 11353
+      },
+      {
+        "query": "What's the command to see memory consumption?",
+        "shouldHit": true,
+        "cacheHit": true,
+        "source": "semantic",
+        "latency": 39
+      },
+      {
+        "query": "How can I monitor RAM usage",
+        "shouldHit": true,
+        "cacheHit": false,
+        "source": "llm",
+        "latency": 12745
+      },
+      {
+        "query": "How do I clear the cache?",
+        "shouldHit": null,
+        "cacheHit": false,
+        "source": "llm",
+        "latency": 11784
+      },
+      {
+        "query": "What's the way to flush the cache?",
+        "shouldHit": true,
+        "cacheHit": true,
+        "source": "semantic",
+        "latency": 40
+      },
+      {
+        "query": "Command to empty the cache",
+        "shouldHit": true,
+        "cacheHit": false,
+        "source": "llm",
+        "latency": 7445
+      },
+      {
+        "query": "How do I create a new branch in git?",
+        "shouldHit": null,
+        "cacheHit": false,
+        "source": "llm",
+        "latency": 4236
+      },
+      {
+        "query": "What's the command to make a new git branch?",
+        "shouldHit": true,
+        "cacheHit": true,
+        "source": "semantic",
+        "latency": 31
+      },
+      {
+        "query": "Steps to create a branch",
+        "shouldHit": true,
+        "cacheHit": false,
+        "source": "llm",
+        "latency": 4807
+      },
+      {
+        "query": "How do I check server logs?",
+        "shouldHit": null,
+        "cacheHit": false,
+        "source": "llm",
+        "latency": 3356
+      },
+      {
+        "query": "What's the command to view the logs?",
+        "shouldHit": true,
+        "cacheHit": false,
+        "source": "llm",
+        "latency": 12370
+      },
+      {
+        "query": "Where can I see the server's logs",
+        "shouldHit": true,
+        "cacheHit": true,
+        "source": "semantic",
+        "latency": 48
+      },
+      {
+        "query": "Start the server",
+        "shouldHit": true,
+        "cacheHit": true,
+        "source": "semantic",
+        "latency": 30
+      },
+      {
+        "query": "Stop the server",
+        "shouldHit": false,
+        "cacheHit": false,
+        "source": "llm",
+        "latency": 2666
+      },
+      {
+        "query": "Enable logging for this service",
+        "shouldHit": false,
+        "cacheHit": false,
+        "source": "llm",
+        "latency": 1922
+      },
+      {
+        "query": "Disable logging for this service",
+        "shouldHit": false,
+        "cacheHit": true,
+        "source": "semantic",
+        "latency": 31
+      },
+      {
+        "query": "How do I connect to the database?",
+        "shouldHit": true,
+        "cacheHit": true,
+        "source": "semantic",
+        "latency": 31
+      },
+      {
+        "query": "How do I disconnect from the database?",
+        "shouldHit": false,
+        "cacheHit": false,
+        "source": "llm",
+        "latency": 5231
+      },
+      {
+        "query": "Increase the memory limit",
+        "shouldHit": false,
+        "cacheHit": false,
+        "source": "llm",
+        "latency": 6291
+      },
+      {
+        "query": "Decrease the memory limit",
+        "shouldHit": false,
+        "cacheHit": true,
+        "source": "semantic",
+        "latency": 36
+      },
+      {
+        "query": "Grant access to this user",
+        "shouldHit": false,
+        "cacheHit": false,
+        "source": "llm",
+        "latency": 3178
+      },
+      {
+        "query": "Revoke access from this user",
+        "shouldHit": false,
+        "cacheHit": false,
+        "source": "llm",
+        "latency": 1936
+      },
+      {
+        "query": "Lock the account",
+        "shouldHit": false,
+        "cacheHit": false,
+        "source": "llm",
+        "latency": 805
+      },
+      {
+        "query": "Unlock the account",
+        "shouldHit": false,
+        "cacheHit": false,
+        "source": "llm",
+        "latency": 1791
+      },
+      {
+        "query": "Deploy the new version",
+        "shouldHit": null,
+        "cacheHit": false,
+        "source": "llm",
+        "latency": 2856
+      },
+      {
+        "query": "Roll back the new version",
+        "shouldHit": false,
+        "cacheHit": false,
+        "source": "llm",
+        "latency": 2021
+      },
+      {
+        "query": "Mute notifications for this channel",
+        "shouldHit": false,
+        "cacheHit": false,
+        "source": "llm",
+        "latency": 10572
+      },
+      {
+        "query": "Unmute notifications for this channel",
+        "shouldHit": false,
+        "cacheHit": false,
+        "source": "llm",
+        "latency": 5986
+      },
+      {
+        "query": "How do I start the server?",
+        "shouldHit": true,
+        "cacheHit": true,
+        "source": "exact",
+        "latency": 11
+      },
+      {
+        "query": "What's the weather today?",
+        "shouldHit": false,
+        "cacheHit": false,
+        "source": "llm",
+        "latency": 1811
+      },
+      {
+        "query": "How do I reset my password?",
+        "shouldHit": true,
+        "cacheHit": true,
+        "source": "exact",
+        "latency": 11
+      },
+      {
+        "query": "What's the capital of France?",
+        "shouldHit": false,
+        "cacheHit": false,
+        "source": "llm",
+        "latency": 533
+      },
+      {
+        "query": "How do I install Node.js?",
+        "shouldHit": true,
+        "cacheHit": true,
+        "source": "exact",
+        "latency": 10
+      },
+      {
+        "query": "Recommend me a good book",
+        "shouldHit": false,
+        "cacheHit": false,
+        "source": "llm",
+        "latency": 621
+      },
+      {
+        "query": "How do I deploy this app?",
+        "shouldHit": true,
+        "cacheHit": true,
+        "source": "exact",
+        "latency": 10
+      },
+      {
+        "query": "What's your favorite movie?",
+        "shouldHit": false,
+        "cacheHit": false,
+        "source": "llm",
+        "latency": 639
+      },
+      {
+        "query": "How do I check memory usage?",
+        "shouldHit": true,
+        "cacheHit": true,
+        "source": "exact",
+        "latency": 10
+      },
+      {
+        "query": "Tell me a joke",
+        "shouldHit": false,
+        "cacheHit": false,
+        "source": "llm",
+        "latency": 534
+      },
+      {
+        "query": "How do I clear the cache?",
+        "shouldHit": true,
+        "cacheHit": true,
+        "source": "exact",
+        "latency": 12
+      },
+      {
+        "query": "What time is it in Tokyo?",
+        "shouldHit": false,
+        "cacheHit": false,
+        "source": "llm",
+        "latency": 789
+      },
+      {
+        "query": "How do I create a new branch in git?",
+        "shouldHit": true,
+        "cacheHit": true,
+        "source": "exact",
+        "latency": 11
+      },
+      {
+        "query": "Suggest a good restaurant nearby",
+        "shouldHit": false,
+        "cacheHit": false,
+        "source": "llm",
+        "latency": 2713
+      }
+    ]
+  },
+  {
+    "name": "nliVeto",
+    "config": {
+      "mode": "veto",
+      "lowCutoff": 0.6,
+      "nliThreshold": 0.5,
+      "baselineThreshold": 0.85
+    },
+    "metrics": {
+      "total": 57,
+      "hitRate": 0.42105263157894735,
+      "fpRate": 0.041666666666666664,
+      "avgLatencyMs": 2634
+    },
+    "results": [
+      {
+        "query": "How do I start the server?",
+        "shouldHit": null,
+        "cacheHit": false,
+        "source": "llm",
+        "latency": 1114
+      },
+      {
+        "query": "What's the command to launch the server?",
+        "shouldHit": true,
+        "cacheHit": true,
+        "source": "semantic",
+        "latency": 116
+      },
+      {
+        "query": "Can you tell me how to boot up the server?",
+        "shouldHit": true,
+        "cacheHit": true,
+        "source": "semantic",
+        "latency": 108
+      },
+      {
+        "query": "How do I reset my password?",
+        "shouldHit": null,
+        "cacheHit": false,
+        "source": "llm",
+        "latency": 3216
+      },
+      {
+        "query": "What's the process to change my password?",
+        "shouldHit": true,
+        "cacheHit": true,
+        "source": "semantic",
+        "latency": 110
+      },
+      {
+        "query": "I forgot my password, how do I recover it?",
+        "shouldHit": true,
+        "cacheHit": true,
+        "source": "semantic",
+        "latency": 106
+      },
+      {
+        "query": "How do I install Node.js?",
+        "shouldHit": null,
+        "cacheHit": false,
+        "source": "llm",
+        "latency": 6186
+      },
+      {
+        "query": "What's the setup process for Node.js?",
+        "shouldHit": true,
+        "cacheHit": true,
+        "source": "semantic",
+        "latency": 117
+      },
+      {
+        "query": "Steps to get Node.js installed",
+        "shouldHit": true,
+        "cacheHit": true,
+        "source": "semantic",
+        "latency": 107
+      },
+      {
+        "query": "How do I connect to Postgres?",
+        "shouldHit": null,
+        "cacheHit": false,
+        "source": "llm",
+        "latency": 7971
+      },
+      {
+        "query": "What's the command to connect to the database?",
+        "shouldHit": true,
+        "cacheHit": false,
+        "source": "llm",
+        "latency": 10567
+      },
+      {
+        "query": "Steps to establish a database connection",
+        "shouldHit": true,
+        "cacheHit": false,
+        "source": "llm",
+        "latency": 6740
+      },
+      {
+        "query": "How do I deploy this app?",
+        "shouldHit": null,
+        "cacheHit": false,
+        "source": "llm",
+        "latency": 5119
+      },
+      {
+        "query": "What's the deployment process?",
+        "shouldHit": true,
+        "cacheHit": false,
+        "source": "llm",
+        "latency": 4816
+      },
+      {
+        "query": "Steps to get this live in production",
+        "shouldHit": true,
+        "cacheHit": false,
+        "source": "llm",
+        "latency": 6211
+      },
+      {
+        "query": "How do I check memory usage?",
+        "shouldHit": null,
+        "cacheHit": false,
+        "source": "llm",
+        "latency": 13836
+      },
+      {
+        "query": "What's the command to see memory consumption?",
+        "shouldHit": true,
+        "cacheHit": true,
+        "source": "semantic",
+        "latency": 104
+      },
+      {
+        "query": "How can I monitor RAM usage",
+        "shouldHit": true,
+        "cacheHit": true,
+        "source": "semantic",
+        "latency": 109
+      },
+      {
+        "query": "How do I clear the cache?",
+        "shouldHit": null,
+        "cacheHit": false,
+        "source": "llm",
+        "latency": 9571
+      },
+      {
+        "query": "What's the way to flush the cache?",
+        "shouldHit": true,
+        "cacheHit": true,
+        "source": "semantic",
+        "latency": 107
+      },
+      {
+        "query": "Command to empty the cache",
+        "shouldHit": true,
+        "cacheHit": true,
+        "source": "semantic",
+        "latency": 121
+      },
+      {
+        "query": "How do I create a new branch in git?",
+        "shouldHit": null,
+        "cacheHit": false,
+        "source": "llm",
+        "latency": 9230
+      },
+      {
+        "query": "What's the command to make a new git branch?",
+        "shouldHit": true,
+        "cacheHit": true,
+        "source": "semantic",
+        "latency": 119
+      },
+      {
+        "query": "Steps to create a branch",
+        "shouldHit": true,
+        "cacheHit": true,
+        "source": "semantic",
+        "latency": 107
+      },
+      {
+        "query": "How do I check server logs?",
+        "shouldHit": null,
+        "cacheHit": false,
+        "source": "llm",
+        "latency": 2425
+      },
+      {
+        "query": "What's the command to view the logs?",
+        "shouldHit": true,
+        "cacheHit": true,
+        "source": "semantic",
+        "latency": 104
+      },
+      {
+        "query": "Where can I see the server's logs",
+        "shouldHit": true,
+        "cacheHit": true,
+        "source": "semantic",
+        "latency": 109
+      },
+      {
+        "query": "Start the server",
+        "shouldHit": true,
+        "cacheHit": true,
+        "source": "semantic",
+        "latency": 96
+      },
+      {
+        "query": "Stop the server",
+        "shouldHit": false,
+        "cacheHit": false,
+        "source": "llm",
+        "latency": 10126
+      },
+      {
+        "query": "Enable logging for this service",
+        "shouldHit": false,
+        "cacheHit": false,
+        "source": "llm",
+        "latency": 4128
+      },
+      {
+        "query": "Disable logging for this service",
+        "shouldHit": false,
+        "cacheHit": false,
+        "source": "llm",
+        "latency": 8333
+      },
+      {
+        "query": "How do I connect to the database?",
+        "shouldHit": true,
+        "cacheHit": true,
+        "source": "semantic",
+        "latency": 102
+      },
+      {
+        "query": "How do I disconnect from the database?",
+        "shouldHit": false,
+        "cacheHit": false,
+        "source": "llm",
+        "latency": 3808
+      },
+      {
+        "query": "Increase the memory limit",
+        "shouldHit": false,
+        "cacheHit": false,
+        "source": "llm",
+        "latency": 9091
+      },
+      {
+        "query": "Decrease the memory limit",
+        "shouldHit": false,
+        "cacheHit": false,
+        "source": "llm",
+        "latency": 7211
+      },
+      {
+        "query": "Grant access to this user",
+        "shouldHit": false,
+        "cacheHit": false,
+        "source": "llm",
+        "latency": 619
+      },
+      {
+        "query": "Revoke access from this user",
+        "shouldHit": false,
+        "cacheHit": false,
+        "source": "llm",
+        "latency": 1946
+      },
+      {
+        "query": "Lock the account",
+        "shouldHit": false,
+        "cacheHit": false,
+        "source": "llm",
+        "latency": 1773
+      },
+      {
+        "query": "Unlock the account",
+        "shouldHit": false,
+        "cacheHit": false,
+        "source": "llm",
+        "latency": 1738
+      },
+      {
+        "query": "Deploy the new version",
+        "shouldHit": null,
+        "cacheHit": false,
+        "source": "llm",
+        "latency": 761
+      },
+      {
+        "query": "Roll back the new version",
+        "shouldHit": false,
+        "cacheHit": false,
+        "source": "llm",
+        "latency": 1569
+      },
+      {
+        "query": "Mute notifications for this channel",
+        "shouldHit": false,
+        "cacheHit": false,
+        "source": "llm",
+        "latency": 1901
+      },
+      {
+        "query": "Unmute notifications for this channel",
+        "shouldHit": false,
+        "cacheHit": true,
+        "source": "semantic",
+        "latency": 108
+      },
+      {
+        "query": "How do I start the server?",
+        "shouldHit": true,
+        "cacheHit": true,
+        "source": "exact",
+        "latency": 11
+      },
+      {
+        "query": "What's the weather today?",
+        "shouldHit": false,
+        "cacheHit": false,
+        "source": "llm",
+        "latency": 618
+      },
+      {
+        "query": "How do I reset my password?",
+        "shouldHit": true,
+        "cacheHit": true,
+        "source": "exact",
+        "latency": 11
+      },
+      {
+        "query": "What's the capital of France?",
+        "shouldHit": false,
+        "cacheHit": false,
+        "source": "llm",
+        "latency": 1713
+      },
+      {
+        "query": "How do I install Node.js?",
+        "shouldHit": true,
+        "cacheHit": true,
+        "source": "exact",
+        "latency": 10
+      },
+      {
+        "query": "Recommend me a good book",
+        "shouldHit": false,
+        "cacheHit": false,
+        "source": "llm",
+        "latency": 958
+      },
+      {
+        "query": "How do I deploy this app?",
+        "shouldHit": true,
+        "cacheHit": true,
+        "source": "exact",
+        "latency": 9
+      },
+      {
+        "query": "What's your favorite movie?",
+        "shouldHit": false,
+        "cacheHit": false,
+        "source": "llm",
+        "latency": 1968
+      },
+      {
+        "query": "How do I check memory usage?",
+        "shouldHit": true,
+        "cacheHit": true,
+        "source": "exact",
+        "latency": 8
+      },
+      {
+        "query": "Tell me a joke",
+        "shouldHit": false,
+        "cacheHit": false,
+        "source": "llm",
+        "latency": 659
+      },
+      {
+        "query": "How do I clear the cache?",
+        "shouldHit": true,
+        "cacheHit": true,
+        "source": "exact",
+        "latency": 10
+      },
+      {
+        "query": "What time is it in Tokyo?",
+        "shouldHit": false,
+        "cacheHit": false,
+        "source": "llm",
+        "latency": 669
+      },
+      {
+        "query": "How do I create a new branch in git?",
+        "shouldHit": true,
+        "cacheHit": true,
+        "source": "exact",
+        "latency": 10
+      },
+      {
+        "query": "Suggest a good restaurant nearby",
+        "shouldHit": false,
+        "cacheHit": false,
+        "source": "llm",
+        "latency": 1612
+      }
+    ]
+  }
+]
