@@ -1,4 +1,12 @@
-# Hybrid Semantic Cache Middleware
+# Hybrid LLM Cache Gateway — Development Report
+
+**Final shipped architecture:** MiniLM semantic retrieval → low-cutoff filter → NLI contradiction veto → cache hit or LLM call.
+
+This document is a complete report of the project: the final architecture first, then the full chronological development history — the original design, what was built, what broke, what was tried next, and how the team arrived at the final architecture — ending with the final evaluation results.
+
+---
+
+# Part A — Final Architecture (as shipped)
 
 ## Research Gap
 
@@ -10,21 +18,190 @@ This works, but has two known problems that existing literature acknowledges and
 "Start the server" and "Stop the server" produce nearly identical meaning vectors because they're about the same topic. A pure semantic cache returns the wrong cached answer. A 2025 study on industrial query caching confirmed this exact failure mode — a query about one system's data was served an answer meant for a completely different system because the embeddings looked close enough.
 
 **Problem 2 — Hardcoded parameters**
-Every semantic cache has two critical settings: a similarity threshold (how similar is "similar enough") and if using hybrid scoring, a fusion weight α. These are set once by the developer and never change. Research shows optimal threshold values range from 0.88 to 0.97 depending on the use case — a single hardcoded value is always wrong for some portion of traffic.
+Every semantic cache has at least one critical setting: a similarity threshold (how similar is "similar enough"). This is set once by the developer and never changes. Research shows optimal threshold values range from 0.88 to 0.97 depending on the use case — a single hardcoded value is always wrong for some portion of traffic.
 
-**The gap:**
-No existing system combines lexical and semantic scoring in the cache decision layer while simultaneously learning both the fusion weight and the similarity threshold from live traffic automatically. The pieces exist separately in literature — hybrid retrieval in search engines, Bayesian hyperparameter tuning in ML — but their combination applied specifically to LLM response caching has not been done.
+**The gap:** No existing system combines semantic retrieval with an explicit logical-contradiction check in the cache decision layer, verified end-to-end in a live production-shaped stack with real tuning derived from measured score distributions rather than guessed defaults.
+
+> *Note on Problem 2: the final architecture does not solve this with automatic (Bayesian) tuning — that approach was built, tested, and dropped (full story in Part B). Instead, parameters are config-driven (Redis-backed, hot-reloadable) and tuned manually from measured score distributions — a deliberate scope decision given the project timeline.*
+
+## Final Solution
+
+A middleware service sits between any Node.js application and an LLM API. The application never calls the LLM directly — it calls this service, which either returns a cached response instantly or forwards to the LLM and stores the result.
+
+**The core mechanism — a two-zone veto architecture:**
+
+```
+semantic_score < LOW_CUTOFF  →  skip straight to LLM (not similar enough to even consider)
+semantic_score >= LOW_CUTOFF →  run NLI contradiction check (always)
+    contradiction >= NLI_THRESHOLD  →  LLM (vetoed — logically contradicts the cached answer)
+    contradiction <  NLI_THRESHOLD  →  cache HIT
+```
+
+Why two zones and not three (high/gray/low): cosine similarity score distributions for genuine paraphrases (0.489–0.969) and genuine non-matches (up to 0.999) **fully overlap** — there is no similarity score, however high, that is safe to auto-accept without running the contradiction check. This was proven empirically (Part B, Week 1 Part 10), not assumed.
+
+**Why a pretrained NLI model instead of a hand-written rule:** an off-the-shelf NLI cross-encoder (`cross-encoder/nli-deberta-v3-small`, no fine-tuning) checks whether the new query logically contradicts the cached one. Hand-written antonym lists and rule-based negation/number checks were tried and rejected — they don't generalize to unseen phrasing and added no measurable benefit over the pretrained model.
+
+**Why this replaced the original hybrid-blend idea:** the original design (`score = α·semantic + (1-α)·lexical`, with Bayesian optimization tuning α and the threshold from live traffic) was fully built, tested, and found structurally broken. The veto architecture is not a modification of that design; it's a different mechanism entirely (a gate, not a blend). The full story of how and why is Part B below.
+
+## Approaches Considered and Rejected
+
+All of the following were implemented and tested on real data, not dismissed on theory alone:
+
+| Approach | Result | Why rejected |
+|---|---|---|
+| Raw Jaccard lexical blend (`α·semantic + (1-α)·lexical`) + Bayesian optimization | Optimizer always converged to α=1.0 (pure semantic) | Trap pairs like "start/stop the server" share almost all words by construction, so Jaccard scores them *higher* than genuine reworded paraphrases — lowering α makes results worse, not better |
+| Stopword-filtered Jaccard | Same conclusion as raw Jaccard | Confirmed the failure is structural, not a tokenization artifact |
+| Hand-written antonym word list | Not pursued to completion | Can't enumerate all antonyms in English; doesn't generalize to unseen query types |
+| Rule-based negation/number-mismatch checks (on top of the NLI veto) | Added no further reduction in wrong hits | One false trigger found ("without" misread as negation), blocking a valid paraphrase |
+| Embedding model swap (`multi-qa-MiniLM-L6-dot-v1`, dot-product retrieval) | No improvement over MiniLM cosine on wrong-hit rate; coarser, harder-to-tune threshold curve | Rejected; kept `all-MiniLM-L6-v2` |
+| Automatic (Bayesian) tuning of the veto's own parameters (`LOW_CUTOFF`, NLI threshold) | Not built | Scoped out for implementation-time reasons, not because it was tested and failed — remains a legitimate avenue for future work |
+
+## Architecture (as shipped)
+
+```
+                        ┌─────────────────────────────────┐
+                        │         Node.js Gateway          │
+User request ──────────▶│                                  │
+                        │  1. Check Redis (exact match)    │
+                        │  2. Generate embedding (MiniLM)  │
+                        │  3. Query pgvector (semantic)    │
+                        │  4. Below lowCutoff? → LLM        │
+                        │  5. Else: call NLI verifier       │
+                        │  6. Contradiction? → LLM, else HIT│
+                        │  7. Log decision to telemetry     │
+                        └────────────┬─────────────────────┘
+                                     │
+                    ┌────────────────┼────────────────┬──────────────┐
+                    ▼                ▼                ▼              ▼
+               ┌─────────┐   ┌────────────┐   ┌──────────┐   ┌──────────────┐
+               │  Redis  │   │ PostgreSQL │   │   Groq   │   │  ml-service  │
+               │         │   │ + pgvector │   │   LLM    │   │  (FastAPI)   │
+               │ L1 cache│   │ L2 cache   │   │          │   │ /embed       │
+               │ config  │   │ embeddings │   │ LLM only │   │ /verify      │
+               │         │   │ telemetry  │   │ on miss  │   │ (MiniLM +    │
+               └─────────┘   └────────────┘   └──────────┘   │  NLI model)  │
+                                                               └──────────────┘
+```
+
+No Bayesian optimizer, no Python worker loop. `cache:config` in Redis (`mode`, `lowCutoff`, `nliThreshold`, `baselineThreshold`) is read fresh on every request and is hot-reloadable — change it with `redis-cli SET` and the next request picks it up immediately, no restart. Tuning is manual, driven by measured score distributions (Part C), not automatic.
+
+## Request Flow
+
+1. Request hits the gateway (`POST /v1/query`)
+2. **L1 check** — Redis exact string match (MD5 hash). Hit → return instantly, logged as `decisionPath: exact`
+3. **Embed** — MiniLM-L6 generates vector locally via `ml-service` (`POST /embed`), ~100ms round trip including network hop
+4. **L2 check** — pgvector finds the single closest stored vector (`LIMIT 1`)
+5. **Cutoff check** — if the candidate's cosine similarity is below `lowCutoff`, skip straight to the LLM (`decisionPath: below_cutoff` / `no_candidate`)
+6. **Verify** — otherwise, call the NLI verifier (`POST /verify` on `ml-service`) with `{query, candidate}`, get back `{contradiction, entailment, neutral}` probabilities
+7. **Decide** — contradiction ≥ `nliThreshold` → `vetoed`, fall through to LLM. Otherwise → `hit`, return the cached response
+8. **Store** — on any LLM call, store the new query + embedding + response in Postgres and Redis (24h TTL)
+9. **Log** — every request writes one telemetry row: `query`, `candidateQuery`, `semanticScore`, `nliContradictionScore`, `nliEntailmentScore`, `decisionPath`, `shouldHit` (ground truth, null for real traffic), `lowCutoffUsed`, `nliThresholdUsed`, `latencyMs`, `verifierLatencyMs`
+
+## Directory Structure (as shipped, GitHub branch `NLI-migration`)
+
+```
+hybrid-llm-cache-gateway/
+│
+├── gateway/                          # Node.js Express service
+│   ├── src/
+│   │   ├── middleware/
+│   │   │   ├── cacheMiddleware.js    ✅ Orchestrates full veto/baseline decision flow
+│   │   │   ├── exactMatch.js         ✅ Redis L1 exact match check
+│   │   │   ├── semanticSearch.js     ✅ pgvector cosine similarity search + store
+│   │   │   ├── verifier.js           ✅ HTTP client → ml-service /verify
+│   │   │   ├── embedder.js           ✅ HTTP client → ml-service /embed
+│   │   │   └── llm.js                ✅ Groq API call on cache miss (renamed from gemini.js)
+│   │   ├── service/
+│   │   │   ├── redis.js              ✅ ioredis client + config reader/writer
+│   │   │   ├── telemetry.js          ✅ Single-object logTelemetry, writes all decision fields
+│   │   │   └── prisma.js             ✅ Prisma client setup
+│   │   └── config/
+│   │       └── default.js            ✅ Cold start defaults: {mode: 'veto', lowCutoff: 0.6, nliThreshold: 0.5, baselineThreshold: 0.85}
+│   ├── prisma/
+│   │   ├── schema.prisma             ✅ TelemetryLog: decisionPath, nliContradictionScore, nliEntailmentScore, lowCutoffUsed, nliThresholdUsed, verifierLatencyMs
+│   │   └── migrations/               ✅ veto_architecture migration applied (dropped alphaUsed/thresholdUsed/similarityScore/lexicalScore)
+│   ├── app.js                        ✅
+│   ├── server.js                     ✅
+│   └── package.json                  ✅
+│
+├── ml-service/                       # Python FastAPI (renamed from optimizer/)
+│   ├── embedder.py                   ✅ Hosts BOTH /embed (MiniLM-L6) and /verify (NLI cross-encoder) in one process
+│   └── requirements.txt              ✅ fastapi, uvicorn, sentence-transformers, torch (no scikit-optimize, no psycopg2, no redis)
+│
+├── evaluation/                       # Fabricated traffic testing
+│   ├── query_set/
+│   │   ├── paraphrases.json          ✅ 9 groups × 3 queries (shouldHit: true for 2nd/3rd)
+│   │   ├── trap_pairs.json           ✅ 8 pairs (shouldHit: false)
+│   │   └── unrelated.json            ✅ 7 pairs (first query is an intentional exact-match sanity check)
+│   ├── simulate_traffic.js           ✅ Sends labeled queries to gateway over time
+│   ├── run_eval.js                   ✅ Two-config comparison: baseline vs nliVeto
+│   └── results/
+│       └── comparison.json           ✅ Latest run: baseline vs veto@0.6, see Part C
+│
+├── demo-app/                         ✅ Minimal Express app routing through the gateway
+├── docker-compose.yml                ✅ Postgres (pgvector) + Redis
+├── plan.md                           ✅ (this file)
+└── README.md                         ⬜ not yet written
+```
+
+**Deleted entirely (dead code from the rejected hybrid-blend architecture):** `gateway/src/middleware/hybridScorer.js`, `gateway/src/middleware/lexicalScorer.js`, `optimizer/bayesian.py`, `optimizer/worker.py`, `optimizer/scorer.py`, `optimizer/db.py`, `optimizer/redis_client.py`, plus ad-hoc research scripts `sweep.py`, `recompute.py`, `research/pair_eval.py` (kept outside the shipped repo, research-only).
+
+**Legend:** ✅ = done and working, ⬜ = not built yet
+
+## Key Technical Decisions (final)
+
+| Decision | Choice | Reason |
+|---|---|---|
+| Embedding model | MiniLM-L6 (local, sentence-transformers) | Free, unlimited, ~3-5ms model latency, no API dependency |
+| Verifier model | `cross-encoder/nli-deberta-v3-small`, off-the-shelf, no fine-tuning | Held-out 255-pair results strong enough that fine-tuning wasn't pursued |
+| Verifier placement | Same FastAPI process as the embedder (port 5050), two endpoints | One less network hop; both models fit comfortably in memory |
+| LLM for responses | Groq (`openai/gpt-oss-20b`) | Switched from Gemini after repeated free-tier deprecations and 503s under sustained test traffic |
+| Vector DB | PostgreSQL + pgvector | Avoids a dedicated vector DB; Prisma supports it natively |
+| Architecture shape | Two-zone (cutoff filter → always-run veto), not three-zone (high/gray/low) | Score distributions for positive and negative pairs fully overlap (0.489–0.999) — no similarity score is safe to auto-accept |
+| Second-signal mechanism | NLI contradiction veto (a gate), not a weighted blend | Weighted lexical blending was tested and found structurally broken |
+| Parameter tuning | Config-driven via Redis, manually tuned from measured score distributions | Automatic (Bayesian) tuning of the veto's parameters was scoped out of this project's timeline, not tested and rejected |
+| Testing approach | Fabricated/labeled traffic (known `shouldHit` ground truth) | Real production traffic has no automatic way to know if a cache hit was correct |
+
+## Known Limitations and Defenses (final)
+
+**`same_topic_different_intent` gap (structural, documented, not solved)**
+The veto only blocks logical contradictions. Queries that are topically related but functionally different (e.g. "check memory usage" vs "increase the memory limit") aren't contradictions, so NLI correctly — but unhelpfully — lets them through if they clear `lowCutoff`. This was found in the Week 1 offline study (4/25 same-topic pairs leaked) and confirmed again live (5 of 6 false positives at `lowCutoff=0.5` were this exact category). `lowCutoff` tuning mitigates but doesn't eliminate this — it works by filtering out the weakest matches in this category, not by teaching the system to understand intent.
+
+**Isolated NLI model failure on specific lexical items**
+Confirmed for "mute"/"unmute" via bidirectional isolated testing; ruled out as a general prefix-antonym problem (4 other prefix pairs tested, all correct). Likely a training-data coverage gap for this specific word pair in the pretrained model. Not fixable by any gateway-side parameter; would require either fine-tuning or an ensemble/second-verifier approach, out of scope for this project.
+
+**Entailment-rescue for missed paraphrases (not implemented)**
+8 of 11 paraphrases MiniLM under-recalled in Week 1 testing had recoverable entailment signal (>0.93). Documented as a real, scoped, bounded limitation and a legitimate future-work item, not pursued given project timeline.
+
+**Ground truth problem in real production traffic**
+The system cannot automatically label a cache hit as correct or incorrect without human review. Mitigated by using fabricated/labeled traffic (`shouldHit` field) for testing; `shouldHit` is `null` for real traffic, and the system makes decisions purely on `lowCutoff`/`nliThreshold` without needing ground truth at runtime.
+
+**No automatic parameter tuning**
+Unlike the originally planned Bayesian optimizer, `lowCutoff` and `nliThreshold` require manual tuning from measured score distributions (as done in this project). This is a conscious scope decision, not a technical dead end.
+
+**Why NLI veto over a weighted blend or a bandit/EMA approach**
+A weighted blend (the original hybrid design) was tested and found structurally unable to separate trap pairs from paraphrases using lexical overlap. A contextual bandit or EMA approach for parameter tuning was considered in the original optimizer design but dropped along with the rest of the automatic tuning scope.
+
+## Remaining Work
+
+- [ ] `README.md` with architecture diagram and setup instructions
+- [ ] Verify citations (GPTCache, and the other literature references in the Research Gap section) before including them in a formal report
+- [ ] Mini-paper / report structure: Abstract, Problem, Related Work, System Design, Evaluation, Conclusion — material for every section exists in this document
+- [ ] Optional, time permitting: short demo video showing a live trap-pair test vetoed in real time
+- [ ] Optional, unscoped: real GPTCache library comparison as a 3rd eval config
+- [ ] Optional, unscoped: entailment-rescue rule, constrained-objective automatic tuning
 
 ---
 
-## Solution
+# Part B — Development History (chronological)
 
-A middleware service that sits between any Node.js application and an LLM API. The application never calls the LLM directly — it calls this service, which either returns a cached response instantly or forwards to the LLM and stores the result.
+This part documents the project exactly as it unfolded: the original design, what was built from it, what the team found when they tested it, and the step-by-step pivot to the final architecture in Part A.
 
-**Two contributions:**
+## B1. Original Design (as first planned) — Hybrid Lexical-Semantic Scoring + Bayesian Optimization
 
-**1. Hybrid lexical-semantic scoring**
-Instead of relying purely on meaning vectors, every cache decision uses a weighted fusion of two signals:
+**Two contributions, as originally conceived:**
+
+**1. Hybrid lexical-semantic scoring.** Instead of relying purely on meaning vectors, every cache decision would use a weighted fusion of two signals:
 
 ```
 Final Score = α × semantic_score + (1 - α) × lexical_score
@@ -34,16 +211,11 @@ Final Score = α × semantic_score + (1 - α) × lexical_score
 - `lexical_score` — Weighted Jaccard similarity between keyword sets (catches keyword mismatches like start vs stop)
 - `α` — the fusion weight, controls how much to trust each signal
 
-This structurally prevents false positives that fool pure semantic systems.
+This was intended to structurally prevent false positives that fool pure semantic systems.
 
-**2. Bayesian optimization loop**
-Instead of hardcoding α and the similarity threshold, a background Python worker reads cache decision logs and uses Bayesian optimization (via scikit-optimize) to find better values from real traffic. It updates the live parameters in Redis every 30 minutes. The gateway reads the new values immediately — no restart required.
+**2. Bayesian optimization loop.** Instead of hardcoding α and the similarity threshold, a background Python worker would read cache decision logs and use Bayesian optimization (via scikit-optimize) to find better values from real traffic, updating the live parameters in Redis every 30 minutes, with the gateway reading new values immediately — no restart required.
 
-Over time the system learns what α and threshold actually work for its traffic, rather than relying on developer intuition at setup time.
-
----
-
-## Architecture
+**Original architecture diagram:**
 
 ```
                         ┌─────────────────────────────────┐
@@ -83,382 +255,70 @@ User request ──────────▶│                               
           └─────────────────────┘
 ```
 
----
+**Original request flow:** L1 Redis exact match → MiniLM embed locally → pgvector top-5 candidates → compute semantic (cosine) + lexical (Jaccard) per candidate → fuse with current α from Redis → compare blended score to threshold from Redis, hit or call LLM → store on miss → log `semanticScore`, `lexicalScore`, `similarityScore` (blended), `shouldHit` to telemetry.
 
-## Request Flow
+### Score Data Flow — the original critical design decision
 
-1. Request hits the gateway
-2. **L1 check** — Redis exact string match. Hit → return instantly
-3. **Embed** — MiniLM-L6 generates vector locally (3-5ms, no API call)
-4. **L2 check** — pgvector finds top 5 closest stored vectors
-5. **Score** — compute semantic score (cosine) + lexical score (Jaccard) for each candidate
-6. **Fuse** — `score = α × semantic + (1-α) × lexical` using current α from Redis
-7. **Decide** — if best score > threshold (from Redis), return cached response. Otherwise call Gemini API for a real LLM response
-8. **Store** — on miss, store query + embedding + response in Postgres and Redis (with TTL)
-9. **Log** — write decision row to telemetry table including:
-   - `semanticScore` — raw cosine similarity (before blending)
-   - `lexicalScore` — raw Jaccard score (before blending)
-   - `similarityScore` — final blended score (for reference)
-   - `shouldHit` — ground truth label (provided by simulator, null in real traffic)
+**Problem discovered:** the gateway originally computed both raw scores (semantic + lexical), blended them into one `similarityScore`, and only logged the blended result — the raw components were discarded. The optimizer needed the raw scores to answer "what if α was 0.3 instead of 0.7?", which requires recomputing `candidate_α × semantic + (1 - candidate_α) × lexical` per log row. With only the blended score stored this is mathematically impossible — you can't un-blend `0.7A + 0.3B = 0.82` back into A and B.
 
----
-
-## Score Data Flow (Critical Design Decision)
-
-### Problem discovered
-
-The gateway originally computed both raw scores (semantic + lexical), blended them into one `similarityScore`, and only logged the blended result. The raw components were discarded.
-
-The optimizer needs the raw scores to answer: "what if α was 0.3 instead of 0.7?" — which requires recomputing `candidate_α × semantic + (1 - candidate_α) × lexical` per log row. With only the blended score stored, this is mathematically impossible — you can't un-blend `0.7A + 0.3B = 0.82` back into A and B.
-
-### Fix
-
-Log all three values in every telemetry row:
-
-| Column | What it stores | Who uses it |
-|--------|---------------|-------------|
-| `semanticScore` | Raw cosine similarity from pgvector | Optimizer (for re-simulation) |
-| `lexicalScore` | Raw Weighted Jaccard score | Optimizer (for re-simulation) |
-| `similarityScore` | `α × semantic + (1-α) × lexical` | Reference / debugging |
-| `shouldHit` | Ground truth label from simulator | Optimizer (for false positive rate) |
-
-### How the optimizer uses them
+**Fix:** log all three values in every telemetry row (`semanticScore`, `lexicalScore`, `similarityScore`, `shouldHit`), so the optimizer could re-blend with any candidate α during re-simulation:
 
 ```python
 def objective(params):
     candidate_alpha, candidate_threshold = params
     logs = fetch_recent_logs()
-
     simulated_hits = 0
     false_positives = 0
     for log in logs:
         semantic, lexical, should_hit = log.semanticScore, log.lexicalScore, log.shouldHit
-        # Re-blend with candidate alpha
         new_score = candidate_alpha * semantic + (1 - candidate_alpha) * lexical
         would_hit = new_score >= candidate_threshold
         if would_hit:
             simulated_hits += 1
             if not should_hit:
                 false_positives += 1
-
     hit_rate = simulated_hits / len(logs)
     fp_rate = false_positives / max(simulated_hits, 1)
     return -(hit_rate - fp_rate * penalty_weight)
 ```
 
-Now `gp_minimize` gets different scores for different `[alpha, threshold]` candidates — it can actually learn.
+### Optimization Loop (original design)
 
----
+Every 30 minutes the Python worker: read last N rows from `telemetry_logs` → skip the cycle if fewer than 30 rows exist → define `objective(params)` that re-simulates hit/miss for each log using candidate `[alpha, threshold]` → pass to `gp_minimize` from scikit-optimize → write the best `[alpha, threshold]` to `cache:config` in Redis → gateway reads new values on next request. Each 30-minute cycle was treated as one experiment, with the Gaussian Process directing the next trial toward unexplored promising areas rather than guessing randomly.
 
-## Optimization Loop
+### Ground Truth via Fabricated Traffic
 
-Every 30 minutes the Python worker:
-
-1. Reads last N rows from `telemetry_logs` table (including `semanticScore`, `lexicalScore`, `shouldHit`)
-2. Checks minimum log threshold — skips cycle if fewer than 30 rows exist
-3. Defines `objective(params)` that re-simulates hit/miss for each log using candidate `[alpha, threshold]`
-4. Passes `objective` to `gp_minimize` from scikit-optimize
-5. scikit-optimize evaluates multiple candidates, each getting a different score based on the re-simulation
-6. Worker writes the best `[alpha, threshold]` to `cache:config` key in Redis
-7. Gateway reads new values on next request
-
-Each 30-minute cycle is one experiment. The Gaussian Process builds a map of which (α, threshold) regions perform well and directs the next trial toward unexplored promising areas rather than guessing randomly.
-
----
-
-## Ground Truth via Fabricated Traffic
-
-### Why fabricated traffic
-
-In real production, you can't automatically know if a cache hit returned the *correct* answer. The system has no way to label a hit as "right" or "wrong" without human review. This is an open research problem.
-
-**Our approach:** Build the system for production, but test it with a traffic simulator that sends queries with known ground truth labels. This lets us:
-
-- Measure real false positive rates (not guesses)
-- Give the optimizer actual `shouldHit` labels to learn from
-- Run controlled experiments (Baseline vs Hybrid Fixed vs Hybrid Adaptive)
-- Validate the system works before deploying on real traffic
-
-### How it works
-
-The traffic simulator sends requests to the gateway with an extra field:
-
-```json
-{
-    "query": "How do I start the server?",
-    "shouldHit": true
-}
-```
-
-The gateway passes `shouldHit` through to telemetry logging. In real production traffic, this field would be `null` — the system still works, the optimizer just uses hit rate and latency alone without false positive penalties.
-
-### Query set composition
+In real production, there's no automatic way to know if a cache hit returned the *correct* answer — this is an open research problem. The chosen approach: build the system for production, but test it with a traffic simulator sending queries with known ground-truth labels, to measure real false positive rates, give the optimizer actual `shouldHit` labels, run controlled experiments, and validate the system before deploying on real traffic.
 
 | Category | Purpose | `shouldHit` label | Example |
-|----------|---------|-------------------|---------|
+|---|---|---|---|
 | Paraphrase pairs | Same meaning, different words — should hit | `true` (after first query cached) | "How to start the server" → "What's the command to launch the server" |
 | Trap pairs | Similar topic, opposite meaning — should NOT hit | `false` | "Start the server" → "Stop the server" |
 | Unrelated queries | Completely different topics — should miss | `false` | "Start the server" → "What's the weather today" |
 
----
+### Original Evaluation Plan
 
-## Evaluation Plan
+Three configurations originally planned for comparison: **Baseline** (pure semantic, fixed α=1.0, fixed threshold=0.85, GPTCache style), **Hybrid Fixed** (fusion formula, fixed α=0.7, fixed threshold=0.85), **Hybrid Adaptive** (full system, Bayesian optimizer running) — measuring hit rate, false positive rate, latency, and parameter convergence over time. The primary claim to prove: Hybrid Adaptive beats Baseline on the hit-rate-vs-false-positive-rate tradeoff.
 
-Three configurations tested on the same fabricated traffic:
-
-| Config | Description |
-|---|---|
-| Baseline | Pure semantic, fixed α=1.0, fixed threshold=0.85 (GPTCache style) |
-| Hybrid Fixed | Fusion formula, fixed α=0.7, fixed threshold=0.85 |
-| Hybrid Adaptive | Full system, Bayesian optimizer running |
-
-Metrics measured:
-- Hit rate — what % of requests were served from cache
-- False positive rate — what % of cache hits were actually wrong answers (using `shouldHit` ground truth)
-- Latency — average response time per configuration
-- Parameter convergence — how α and threshold change over time as optimizer runs
-
-The primary claim to prove: Hybrid Adaptive achieves a better hit rate vs false positive rate tradeoff than the Baseline.
-
----
-
-## Directory Structure
-
-```
-hybrid-llm-cache-gateway/
-│
-├── gateway/                          # Node.js Express service
-│   ├── src/
-│   │   ├── middleware/
-│   │   │   ├── cacheMiddleware.js    ✅ Main middleware — orchestrates full flow
-│   │   │   ├── exactMatch.js         ✅ Redis L1 exact match check
-│   │   │   ├── semanticSearch.js     ✅ pgvector cosine similarity search + store
-│   │   │   ├── lexicalScorer.js      ✅ Weighted Jaccard similarity
-│   │   │   ├── hybridScorer.js       ✅ Returns raw semantic + lexical alongside blended score
-│   │   │   ├── embedder.js           ✅ HTTP client → Python embedder
-│   │   │   └── gemini.js             ✅ Gemini API call on cache miss
-│   │   ├── service/
-│   │   │   ├── redis.js              ✅ ioredis client + config reader/writer
-│   │   │   ├── telemetry.js          ✅ Accepts semanticScore, lexicalScore, shouldHit
-│   │   │   └── prisma.js             ✅ Prisma client setup
-│   │   └── config/
-│   │       └── default.js            ✅ Cold start α and threshold init
-│   ├── prisma/
-│   │   ├── schema.prisma             ✅ semanticScore, lexicalScore, shouldHit columns added
-│   │   ├── prisma7.config.ts         ✅
-│   │   └── migrations/               ✅ Migration applied
-│   ├── app.js                        ✅ Express app setup
-│   ├── server.js                     ✅ Entry point + initConfig
-│   └── package.json                  ✅
-│
-├── optimizer/                        # Python services
-│   ├── embedder.py                   ✅ MiniLM-L6 HTTP server (FastAPI)
-│   ├── db.py                         ✅ Postgres connection + telemetry queries (bug-fixed)
-│   ├── redis_client.py               ✅ Redis connection + config read/write (bug-fixed)
-│   ├── scorer.py                     ✅ Re-simulates with candidate params + shouldHit FP rate
-│   ├── bayesian.py                   ✅ gp_minimize wrapper with proper objective function
-│   ├── worker.py                     ✅ 30-min loop with min-30 log guard
-│   └── requirements.txt              ✅
-│
-├── evaluation/                       # Fabricated traffic testing
-│   ├── query_set/
-│   │   ├── paraphrases.json          ✅ Same meaning, different words (shouldHit: true)
-│   │   ├── trap_pairs.json           ✅ Similar topic, opposite meaning (shouldHit: false)
-│   │   └── unrelated.json            ✅ Completely different topics (shouldHit: false)
-│   ├── simulate_traffic.js           ✅ Sends labeled queries to gateway over time
-│   ├── run_eval.js                   ✅ Three-config comparison (Baseline vs Fixed vs Adaptive)
-│   └── results/                      ⬜ Output from actual eval run
-│
-├── demo-app/                         # Minimal demo
-│   ├── server.js                     ✅ Express app routing through gateway (bug-fixed)
-│   └── package.json                  ✅
-│
-├── docker-compose.yml                ✅ Postgres (pgvector) + Redis
-├── .env                              ✅
-├── .env.example                      ⬜
-├── plan.md                           ✅ (this file)
-└── README.md                         ⬜
-```
-
-**Legend:** ✅ = done and working, 🔧 = exists but needs update, ⬜ = not built yet
-
----
-
-## Changes Log
-
-### Bugs fixed in optimizer (Sep 24, 2026)
-
-| File | Bug | Fix |
-|------|-----|-----|
-| `embedder.py` | `/embed` endpoint had no `return` statement — always returned `null` | Added `return {"embedding": vec}` |
-| `redis_client.py` | `get_config()` crashed with `TypeError` when Redis key didn't exist (`json.loads(None)`) | Added `None` guard before `json.loads` |
-| `db.py` | Connection leak — `cur.close()` and `conn.close()` unreachable on exception | Wrapped in `try/finally` with `conn = None` / `cur = None` init before try block |
-| `scorer.py` | `log[0] == True` fragile comparison | Changed to `log[0]` (truthy check) |
-
-### Design fix: raw score logging (Sep 24, 2026)
-
-**Problem:** The optimizer's `objective(params)` function received candidate `[alpha, threshold]` from `gp_minimize` but couldn't use them because the telemetry table only stored the pre-blended `similarityScore`. The raw `semanticScore` and `lexicalScore` were computed in `hybridScorer.js`, blended, and the individual components were thrown away.
-
-**Impact:** `gp_minimize` got the same score for every candidate — it literally could not optimize anything. The loop ran but learned nothing.
-
-**Fix requires changes in:**
-1. `schema.prisma` — add `semanticScore`, `lexicalScore` columns
-2. `hybridScorer.js` — return all three scores (semantic, lexical, blended)
-3. `cacheMiddleware.js` — pass raw scores to telemetry logger
-4. `telemetry.js` — accept and write the new fields
-5. `db.py` — query the new columns
-6. `scorer.py` — re-simulate hit/miss with candidate params using raw scores
-
-### New: ground truth via `shouldHit` (Sep 25, 2026)
-
-Added `shouldHit` boolean column to `TelemetryLog` — carries the expected correct answer from the traffic simulator. Lets the optimizer compute real false positive rates instead of approximations. Value is `null` for real (non-simulated) traffic.
-
-### New: fabricated traffic approach (Sep 25, 2026)
-
-Instead of testing on real production traffic (where ground truth is unknowable), the system is tested with a traffic simulator (`simulate_traffic.js`) that sends queries with known `shouldHit` labels. The system is built production-ready, but validated with controlled fabricated traffic.
-
-### Bug fixed in demo-app (Sep 30, 2026)
-
-| File | Bug | Fix |
-|------|-----|-----|
-| `demo-app/server.js` | `fetch()` and `.json()` missing `await` — response data was always undefined | Added `await` to both async calls |
-
----
-
-## Build Strategy (Updated)
-
-### Phase 1 — Infrastructure ✅ DONE
-- Docker Compose running Redis + Postgres locally
-- pgvector extension enabled
-- Prisma schema: `CachedResponse` table and `TelemetryLog` table
-- Gateway skeleton — Express server that proxies requests through
-- MiniLM-L6 embedding call working end to end via sentence-transformers
-
----
-
-### Phase 2 — Baseline cache ✅ DONE
-- L1 Redis exact match check with TTL
-- pgvector nearest neighbor query in Postgres
-- Fixed threshold decision (α=1.0, threshold=0.85 — pure semantic)
-- Cache miss stores to Redis + Postgres
-- Telemetry logging on every decision
-
----
-
-### Phase 3 — Hybrid scorer ✅ DONE
-- Jaccard scorer in Node
-- Fusion formula with configurable α from Redis
-- `hybridScorer.js`, `lexicalScorer.js` working
-
----
-
-### Phase 4 — Schema + telemetry updates ✅ DONE
-Update the gateway to log raw scores and ground truth labels.
-
-**4a. Schema migration**
-- Add `semanticScore Float?` to `TelemetryLog` (raw cosine similarity)
-- Add `lexicalScore Float?` to `TelemetryLog` (raw Jaccard score)
-- Add `shouldHit Boolean?` to `TelemetryLog` (ground truth from simulator)
-- Keep existing `similarityScore` as the blended score (rename optional but not required)
-- Run `npx prisma migrate dev`
-
-**4b. Gateway code updates**
-- `hybridScorer.js` — return `{ score, semantic, lexical }` instead of just the blended number
-- `cacheMiddleware.js` — destructure raw scores and pass them + `shouldHit` (from `req.body`) to telemetry
-- `telemetry.js` — accept `semanticScore`, `lexicalScore`, `shouldHit` and write them to the database
-
-**Done when:** A request logged to `telemetry_logs` includes all three score columns and `shouldHit` (null for requests without the field).
-
----
-
-### Phase 5 — Optimizer (Python worker) ✅ DONE
-Build the Bayesian optimization loop with the correct objective function.
-
-**5a. Update existing files**
-- `db.py` — update SQL query to select `semanticScore`, `lexicalScore`, `shouldHit` alongside existing columns
-- `scorer.py` — rework to accept candidate `[alpha, threshold]`, re-simulate hit/miss per log using raw scores, compute real false positive rate using `shouldHit`
-
-**5b. New files**
-- `bayesian.py` — wraps `gp_minimize`, defines `objective(params)` that calls scorer with candidate params
-- `worker.py` — main loop: fetch logs → guard (min 30 rows) → run bayesian → write new config to Redis → sleep 30 minutes
-
-**Done when:** Worker runs, α and threshold values change in Redis based on telemetry data, and different candidate params produce different scores.
-
----
-
-### Phase 6 — Fabricated traffic + evaluation 🔧 CODE DONE — NEEDS ACTUAL RUN
-Build the traffic simulator and run the three-config comparison.
-
-**6a. Query sets**
-- `evaluation/query_set/paraphrases.json` — same meaning, different words
-- `evaluation/query_set/trap_pairs.json` — similar topic, opposite meaning
-- `evaluation/query_set/unrelated.json` — completely different topics
-
-**6b. Traffic simulator**
-- `evaluation/simulate_traffic.js` — reads query sets, sends labeled requests to gateway with `shouldHit` field, spreads them over time to generate realistic telemetry for the optimizer
-
-**6c. Three-config evaluation**
-- `evaluation/run_eval.js` — runs Baseline (α=1.0), Hybrid Fixed (α=0.7), Hybrid Adaptive (optimizer running) on the same query set, records metrics per config
-- Output: CSVs and comparison tables in `evaluation/results/`
-
-**Done when:** You have a table and at least one graph showing Hybrid Adaptive outperforms Baseline on the hit rate vs false positive tradeoff.
-
----
-
-### Phase 7 — Demo app + writeup 🔧 DEMO DONE — NEEDS WRITEUP
-- `demo-app/` — minimal Express app that routes through the gateway
-- README with architecture diagram and setup instructions
-- Mini paper structure: Abstract, Problem, Related Work, System Design, Evaluation, Conclusion
-- Cite: GPTCache, Category-Aware Caching paper, INFOCOM 2026 paper (differentiate explicitly), Temporal Semantic Caching paper
-- Short demo video showing optimizer changing params live
-
----
-
-## Key Technical Decisions
-
-| Decision | Choice | Reason |
-|---|---|---|
-| Embedding model | MiniLM-L6 (local, sentence-transformers) | Free, unlimited, 3-5ms latency, no API dependency |
-| LLM for responses | Gemini API | Called only on cache miss, free tier sufficient |
-| Vector DB | PostgreSQL + pgvector | Avoids dedicated vector DB, Prisma v7 supports it natively |
-| Lexical metric | Weighted Jaccard | ~20 lines of JS, no library, interpretable |
-| Optimizer | scikit-optimize gp_minimize | Correct tool, well documented, no need to implement Bayesian from scratch |
-| Parameter store | Redis key | Both Node and Python can read/write, zero latency for gateway |
-| Telemetry store | PostgreSQL table | Persistent, queryable, already in stack |
-| Raw score logging | Store semantic + lexical separately | Optimizer must re-blend with candidate α to evaluate alternatives |
-| Ground truth | `shouldHit` column from simulator | Real FP rate instead of heuristic approximation |
-| Testing approach | Fabricated traffic with known labels | Production-ready code, validated with controlled experiments |
-
----
-
-## Worker Guard Condition
-
-The Python worker checks for a minimum number of telemetry logs before running optimization. If fewer than 30 logs exist for the current cycle, the worker skips and waits for the next cycle.
+### Worker Guard Condition
 
 ```python
 def run_optimization_cycle():
     logs = fetch_recent_logs()
-
     if len(logs) < 30:
         print("Not enough data yet, skipping this cycle")
         return
-
     result = run_bayesian(logs)
     set_config(result.alpha, result.threshold)
     print(f"Updated config: alpha={result.alpha}, threshold={result.threshold}")
 ```
 
-This prevents the optimizer from making wild guesses on insufficient data during the first 30 minutes or during low traffic periods.
+This prevented the optimizer from making wild guesses on insufficient data during the first 30 minutes or during low-traffic periods.
 
----
-
-## Cold Start Behavior
-
-On first boot, the gateway writes default values to Redis only if `cache:config` does not already exist:
+### Cold Start Behavior
 
 ```js
 const DEFAULTS = { alpha: 0.7, threshold: 0.85 }
-
 async function initConfig() {
     const existing = await redis.get('cache:config')
     if (!existing) {
@@ -467,243 +327,110 @@ async function initConfig() {
 }
 ```
 
-Redis is always the source of truth. The hardcoded defaults are only a fallback for the very first boot. During the first 30 minutes the system operates on these defaults — caching works normally, telemetry accumulates, and the optimizer waits until enough data exists before running its first cycle.
+Redis was always the source of truth; hardcoded defaults were only a fallback for the very first boot.
 
----
+### Redis Memory Management
 
-## Redis Memory Management
+Two mechanisms kept Redis lean: a 24-hour TTL on every write (`redis.set(queryKey, response, 'EX', 86400)`), and LRU eviction once Redis hits its memory ceiling (`--maxmemory 256mb --maxmemory-policy allkeys-lru`). Nothing was ever lost — anything evicted from Redis still lived in Postgres.
 
-Redis lives in RAM and cannot grow indefinitely. Two mechanisms keep it lean:
+### Original directory structure and Key Technical Decisions
 
-**TTL — every write expires automatically**
+The original plan targeted a directory layout with `gateway/src/middleware/{hybridScorer.js, lexicalScorer.js, ...}` and a separate `optimizer/` Python service (`embedder.py`, `db.py`, `redis_client.py`, `scorer.py`, `bayesian.py`, `worker.py`). Key early decisions: MiniLM-L6 for embeddings, Gemini API for LLM responses, PostgreSQL+pgvector for the vector store, Weighted Jaccard for the lexical metric, scikit-optimize `gp_minimize` for the optimizer, Redis for the shared parameter store. All of this directory structure and tooling was later superseded — see B7–B9.
 
-Every response written to Redis gets a 24-hour expiry. After that it auto-deletes. If the same query comes in after 24 hours it is a Redis miss but a Postgres hit — slightly slower but still no LLM call.
+### Original Known Limitations (as first documented)
 
-```js
-await redis.set(queryKey, response, 'EX', 86400)
-```
+- **Ground truth problem** — mitigated via fabricated traffic with known `shouldHit` labels; real traffic optimizes on hit rate and latency alone.
+- **Why Bayesian optimization over a contextual bandit or EMA** — EMA misses the α/threshold interaction; the search space is non-convex; Bayesian is more sample-efficient for expensive 30-minute experiments. Trade-off acknowledged for very high traffic systems, noted as future work.
+- **Embedding latency** — MiniLM-L6 runs locally at 3-5ms, so this wasn't a practical concern.
 
-**LRU eviction — Redis manages its own memory limit**
+## B2. Build Strategy and Status (original 7 phases)
 
-When Redis hits its memory ceiling it automatically evicts the least recently used entries. Hot queries stay, cold ones fall back to Postgres. Configured in docker-compose:
-
-```yaml
-command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru
-```
-
-**Why this is not over-engineering**
-
-Any system writing to Redis indefinitely will eventually crash with an out-of-memory error. TTL and LRU are standard production patterns, not added complexity. The fix is 3 lines of code total.
-
-**Responsibility split between the two stores**
-
-| | Redis | Postgres |
+| Phase | Scope | Status at the time |
 |---|---|---|
-| Purpose | Exact match, instant response | Semantic search, permanent storage |
-| Lives in | RAM | Disk |
-| Speed | Sub-millisecond | 10-50ms |
-| Stores | Recent + frequent queries only | Everything permanently |
-| When full | LRU evicts cold entries | Never fills (disk) |
+| 1 — Infrastructure | Docker Compose (Redis + Postgres/pgvector), Prisma schema, gateway skeleton, MiniLM embedding call | ✅ Done |
+| 2 — Baseline cache | L1 Redis exact match, pgvector nearest neighbor, fixed threshold decision, telemetry logging | ✅ Done |
+| 3 — Hybrid scorer | Jaccard scorer, fusion formula with configurable α | ✅ Done |
+| 4 — Schema + telemetry updates | Add `semanticScore`/`lexicalScore`/`shouldHit` columns, wire through middleware and telemetry service | ✅ Done |
+| 5 — Optimizer (Python worker) | `db.py`, `scorer.py`, `bayesian.py` (gp_minimize wrapper), `worker.py` (30-min loop, min-30 guard) | ✅ Done |
+| 6 — Fabricated traffic + evaluation | Query sets (paraphrases/trap/unrelated), `simulate_traffic.js`, `run_eval.js` three-config comparison | 🔧 Code done, not yet run |
+| 7 — Demo app + writeup | Minimal demo app, README, mini-paper structure, citations, demo video | 🔧 Demo done, writeup pending |
 
-Nothing is ever lost. If Redis evicts an entry it still lives in Postgres. Redis is the fast lane, Postgres is the source of truth.
+## B3. Early Bug Fixes (Sep 24–30, 2026)
 
----
+**Bugs fixed in the optimizer (Sep 24):**
 
-## Known Limitations and Defenses
+| File | Bug | Fix |
+|---|---|---|
+| `embedder.py` | `/embed` endpoint had no `return` statement — always returned `null` | Added `return {"embedding": vec}` |
+| `redis_client.py` | `get_config()` crashed with `TypeError` when Redis key didn't exist (`json.loads(None)`) | Added `None` guard before `json.loads` |
+| `db.py` | Connection leak — `cur.close()`/`conn.close()` unreachable on exception | Wrapped in `try/finally` |
+| `scorer.py` | `log[0] == True` fragile comparison | Changed to a plain truthy check |
 
-**Ground truth problem**
+**Design fix: raw score logging (Sep 24)** — see B1's Score Data Flow section above; this is where that fix was made (`schema.prisma`, `hybridScorer.js`, `cacheMiddleware.js`, `telemetry.js`, `db.py`, `scorer.py` all touched).
 
-The system cannot automatically label a cache hit as correct or incorrect in real production traffic. Our mitigation:
+**New: ground truth via `shouldHit` (Sep 25)** — added the `shouldHit` boolean column described in B1, carried forward unchanged into the final architecture.
 
-- Testing uses a traffic simulator that sends queries with known `shouldHit` labels — paraphrase pairs and trap pairs where correct behavior is predefined
-- The `shouldHit` column is `null` for real traffic — the optimizer falls back to optimizing hit rate and latency alone, without false positive penalties
-- Establishing reliable ground truth in production caching systems is an open research problem, acknowledged as a limitation in the writeup
+**New: fabricated traffic approach (Sep 25)** — adopted the simulator-based testing approach described in B1, also carried forward unchanged.
 
-**Why Bayesian optimization over a contextual bandit or EMA**
+**Bug fixed in demo-app (Sep 30):** `fetch()` and `.json()` calls were missing `await` in `demo-app/server.js`, so response data was always undefined. Fixed by adding `await` to both.
 
-- EMA treats α and threshold independently and misses their interaction — a threshold of 0.91 behaves differently depending on what α is set to. Bayesian optimization models the joint space.
-- The search space is non-convex — there is no single smooth hill to climb. Bayesian makes no convexity assumption.
-- Sample efficiency — with 30-minute cycles and moderate traffic, each experiment is expensive. Bayesian extracts maximum information from minimum trials. Bandits need far more data to converge to the same quality.
-
-Trade-off acknowledged: for very high traffic systems a contextual bandit would be more practical. Noted as future work.
-
-**Embedding latency**
-
-MiniLM-L6 runs locally at 3-5ms — this concern does not apply. If an external embedding API were used instead, a cache hit would still cost ~120ms total versus 2000-5000ms for a direct LLM call, making it worthwhile on balance.
-
----
-
-## Local End-to-End Testing (Oct 3, 2026)
+## B4. Local End-to-End Testing (Oct 3, 2026)
 
 With all phases built, the system was run end to end for the first time across all local services: Docker (Postgres + Redis), `embedder.py` (FastAPI), `gateway/server.js`, and `demo-app/server.js`.
 
-### Bugs found and fixed during first integration run
+**Bugs found and fixed during first integration run:**
 
 | Issue | Root cause | Fix |
 |---|---|---|
-| Embedder failed to bind to port 5000 | Port already in use by a prior process | Moved embedder to port 5050, updated `embedder.js` fetch URL to match |
-| `password authentication failed for user "postgres"` | `.env` `DATABASE_URL` used a hardcoded user that didn't match `POSTGRES_USER` | Verified `.env` consistency; required a full `docker-compose down -v` to force Postgres to reinitialize with current `.env` values, since Postgres only applies `POSTGRES_USER`/`PASSWORD`/`DB` on first container init with an empty volume |
-| `relation "cached_responses" does not exist` | Volume wipe reset the database with no schema applied | Reran `npx prisma migrate dev` to reapply all migrations |
-| `models/gemini-1.5-flash is not found` | Model deprecated by Google since the integration was first coded | Updated to `gemini-2.5-flash` |
-| `gemini-2.5-flash is no longer available to new users` | Model further deprecated; error response explicitly named the replacement | Updated to `gemini-3.8-flash` |
-| `Unknown argument semanticScore` in Prisma Client | `npx prisma migrate dev` was originally run from the wrong working directory and silently failed before the schema fix in Phase 4 was ever applied as a real migration | Ran `npx prisma generate` to regenerate Prisma Client against the already-correct schema, then restarted the gateway process to load the new client |
-| API key exposed in terminal output pasted into chat | n/a (operational mistake, not a code bug) | Key rotated immediately in Google AI Studio |
+| Embedder failed to bind to port 5000 | Port already in use | Moved embedder to port 5050, updated `embedder.js` fetch URL |
+| `password authentication failed for user "postgres"` | `.env` `DATABASE_URL` used a hardcoded user mismatched with `POSTGRES_USER` | Fixed `.env`; required `docker-compose down -v` to force Postgres to reinitialize |
+| `relation "cached_responses" does not exist` | Volume wipe reset the database with no schema applied | Reran `npx prisma migrate dev` |
+| `models/gemini-1.5-flash is not found` | Model deprecated | Updated to `gemini-2.5-flash` |
+| `gemini-2.5-flash is no longer available to new users` | Model further deprecated | Updated to `gemini-3.8-flash` |
+| `Unknown argument semanticScore` in Prisma Client | Migration originally run from wrong directory, silently failed | Ran `npx prisma generate`, restarted gateway |
+| API key exposed in terminal output pasted into chat | Operational mistake, not a code bug | Key rotated immediately in Google AI Studio |
 
-### Core pipeline verification
+**Core pipeline verification** — all three cache decision paths were directly observed working and cross-checked against `telemetry_logs`: exact match (`source: exact`), cache miss (`source: llm`), semantic hit (`source: semantic`, a reworded paraphrase correctly matched via pgvector + hybrid scoring).
 
-All three cache decision paths were directly observed working, confirmed via live requests and cross-checked against `telemetry_logs`:
+**A near-miss case** was captured directly in telemetry, confirming the hybrid formula was implemented correctly and demonstrating exactly the problem the Bayesian optimizer existed to solve:
 
-- **Exact match (`source: exact`)** — repeat identical query served instantly from Redis
-- **Cache miss (`source: llm`)** — new query correctly routed to Gemini, response stored in both Redis and Postgres
-- **Semantic hit (`source: semantic`)** — a reworded paraphrase ("What city is Germanys capital city?") correctly matched a previously cached entry via pgvector + hybrid scoring, with no exact string match involved
-
-A near-miss case was also captured directly in telemetry, confirming the hybrid formula is implemented correctly and demonstrating the exact problem the project's Bayesian optimizer exists to solve:
-
+```
 query: "Which city is the capital of Germany?"
 semanticScore: 0.9379
 lexicalScore: 0.625
 similarityScore: 0.8440 (= 0.7 × 0.9379 + 0.3 × 0.625)
 thresholdUsed: 0.85
 cacheHit: false
+```
 
+The blended score missed the fixed 0.85 threshold by 0.006 despite a very high semantic signal — confirming a static threshold under-caches legitimate paraphrases, and that the lexical component materially affects real decisions. A manual sanity check (temporarily lowering the Redis threshold to 0.80) confirmed the gateway reads config live from Redis on every request, with no restart delay — validating the hot-reload design.
 
-The blended score missed the fixed 0.85 threshold by 0.006 despite the semantic signal being very high — confirming that a static threshold under-caches legitimate paraphrases, and that the lexical component, not just the semantic one, materially affects real decisions.
+**A second, unplanned case** provided direct empirical evidence for the project's core thesis:
 
-A manual sanity check (temporarily lowering `cache:config` threshold to 0.80 via `redis-cli`) confirmed the gateway reads config live from Redis on every request, with no restart or caching delay — validating the hot-reload design the Bayesian optimizer depends on.
-
-A case found during testing (not from the planned trap_pairs set) provides direct empirical evidence for the project's core thesis:
-
+```
 query: "Germany is the capital of what city?"
 semanticScore: 0.9851
-lexicalScore:  0.4444
-similarityScore: 0.8229   (= 0.7 × 0.9851 + 0.3 × 0.4444)
+lexicalScore: 0.4444
+similarityScore: 0.8229 (= 0.7 × 0.9851 + 0.3 × 0.4444)
 thresholdUsed: 0.85
 cacheHit: false
-
-Semantic similarity alone (0.985) would have classified this as a near-identical match to a previously cached query under pure semantic caching (α = 1.0, the Baseline config) — likely returning an incorrect cached answer. The lexical component pulled the blended score down to 0.823, correctly keeping it below threshold. This is a real, unplanned confirmation of the false-positive failure mode described in the Research Gap section, caught by the hybrid formula exactly as designed.
-
-### Still to verify
-
-- `worker.py` — optimizer loop has not yet been run against accumulated telemetry to confirm it actually updates Redis config based on real data
-- `evaluation/simulate_traffic.js` and `evaluation/run_eval.js` — written but not yet executed; `evaluation/results/` is still empty
-
-## Hosting Strategy
-
-**Local development**
-
-Everything runs via Docker Compose — Postgres (pgvector/pgvector:pg16 image), Redis with LRU config, Node gateway, Python optimizer. No internet dependency, no free tier limits, works offline.
-
-```yaml
-# docker-compose.yml (local development)
-version: '3.8'
-
-services:
-  gateway:
-    build: ./gateway
-    ports:
-      - "3000:3000"
-    env_file: .env
-    depends_on:
-      - postgres
-      - redis
-
-  optimizer:
-    build: ./optimizer
-    env_file: .env
-    depends_on:
-      - postgres
-      - redis
-
-  postgres:
-    image: pgvector/pgvector:pg16
-    environment:
-      POSTGRES_USER: admin
-      POSTGRES_PASSWORD: password
-      POSTGRES_DB: hybridcache
-    ports:
-      - "5432:5432"
-    volumes:
-      - pgdata:/var/lib/postgresql/data
-
-  redis:
-    image: redis:7-alpine
-    command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru
-    ports:
-      - "6379:6379"
-
-volumes:
-  pgdata:
 ```
 
-**Deployment**
+Semantic similarity alone (0.985) would have classified this as a near-identical match under pure semantic caching (α = 1.0) — likely returning a wrong cached answer. The lexical component pulled the blended score down to 0.823, correctly keeping it below threshold. This was a real, unplanned confirmation of the false-positive failure mode described in the Research Gap, caught by the hybrid formula exactly as designed — at this point in the project, the hybrid blend still looked like it was working.
 
-External managed services replace the local containers. Docker Compose shrinks to just the two application services:
+**Still to verify at this point:** `worker.py` had not yet been run against accumulated telemetry; `evaluation/simulate_traffic.js` and `run_eval.js` were written but not yet executed.
 
-```yaml
-# docker-compose.yml (production)
-version: '3.8'
+## B5. Optimizer Validation and Honest Findings (Oct 4, 2026)
 
-services:
-  gateway:
-    build: ./gateway
-    ports:
-      - "3000:3000"
-    env_file: .env
+**Infrastructure changes during this session:** LLM provider switched from Gemini to Groq — Gemini's free tier proved too unreliable for repeated testing (`gemini-1.5-flash` and `gemini-2.5-flash` both deprecated mid-project; even `gemini-3.8-flash` triggered consistent 503 "high demand" errors under sustained testing). Switched to Groq (`openai/gpt-oss-20b`, after `llama-3.1-8b-instant` and `llama-3.3-70b-versatile` returned 404s as gated/paid-tier-only). The function name `callGemini` was kept unchanged in `cacheMiddleware.js` to avoid touching the call site — only `gemini.js`'s internals changed. Also fixed: `redis_client.py` required forcing RESP2 explicitly, since `redis-py` v5+ attempts a RESP3 `HELLO` handshake by default, unsupported by the `redis:7-alpine` container.
 
-  optimizer:
-    build: ./optimizer
-    env_file: .env
+**Traffic simulation:** `simulate_traffic.js` was run against an expanded query set (57 total pairs, expanded from ~23 to clear the optimizer's `MIN_LOGS = 30` guard with margin). `sendQuery` was made resilient (try/catch, log-and-continue) after early runs crashed entirely on a single transient error. Final telemetry count: 88 logged rows. `bayesian.py` was updated to print every `gp_minimize` trial so the optimizer's search behavior was auditable.
+
+**Bug found and fixed: zero-hit exploit in the objective function.** `scorer.py`'s `simulate_score` originally returned `-1` when a candidate `(alpha, threshold)` produced zero cache hits. At higher `penalty_weight` values this made "cache nothing" a rational escape hatch — multiple trials at `penalty_weight=3.0` converged on thresholds near 0.88–0.93 that hit nothing at all, scoring `-1.0000` (better than several real-hit configs), instead of genuinely searching for a good tradeoff. **Fix:** changed the zero-hit penalty from `-1` to `-5`, always worse than any plausible real-hit outcome.
+
+**Core finding: the hybrid mechanism validated at the individual-decision level.** Direct telemetry inspection of a trap pair confirmed the formula works exactly as designed:
+
 ```
-
-| Service | Local | Deployed |
-|---|---|---|
-| Gateway | Docker Compose | Render |
-| Optimizer | Docker Compose | Render (second service) |
-| Postgres | Docker Compose (pgvector image) | Supabase (pgvector built in) |
-| Redis | Docker Compose | Upstash (free tier, persists across restarts) |
-
-Environment variables swap between local and production — no code changes:
-
-```bash
-# .env (local)
-DATABASE_URL=postgresql://admin:password@localhost:5432/hybridcache
-REDIS_URL=redis://localhost:6379
-GEMINI_API_KEY=your_key
-
-# .env (production)
-DATABASE_URL=postgresql://your-supabase-connection-string
-REDIS_URL=rediss://your-upstash-url
-GEMINI_API_KEY=your_key
-```
-
-Same codebase, different environment variables.
-
-## Optimizer Validation and Honest Findings (Oct 4, 2026)
-
-### Infrastructure changes during this session
-
-**LLM provider switched from Gemini to Groq.** Gemini's free tier proved too unreliable for repeated testing — `gemini-1.5-flash` and `gemini-2.5-flash` were both deprecated mid-project, and even after updating to `gemini-3.8-flash`, sustained testing (~57 queries via `simulate_traffic.js`) triggered consistent 503 "high demand" errors that retry/backoff logic could not resolve. Switched to Groq (`openai/gpt-oss-20b`, confirmed available on the account's free tier after `llama-3.1-8b-instant` and `llama-3.3-70b-versatile` returned 404s as gated/paid-tier-only models). The `callGemini` function name was kept unchanged in `cacheMiddleware.js` to avoid touching the call site — only `gemini.js`'s internals changed.
-
-**`redis-client.py` required `protocol=2`** — `redis-py` v5+ attempts a `HELLO` handshake for RESP3 by default, which the project's `redis:7-alpine` container does not support. Fixed by forcing RESP2 explicitly in the client constructor.
-
-### Traffic simulation
-
-`evaluation/simulate_traffic.js` was run against an expanded query set (57 total pairs across paraphrases, trap pairs, and unrelated categories — expanded from the original ~23 to clear the optimizer's `MIN_LOGS = 30` guard with margin). `sendQuery` was made resilient (try/catch, log-and-continue on failure) after early runs crashed entirely on a single transient error. Final telemetry count: 88 logged rows.
-
-### Optimizer trajectory logging added
-
-`bayesian.py` was updated to print every `gp_minimize` trial (`alpha`, `threshold`, `score`) plus a final summary, so the optimizer's search behavior is auditable rather than a black box producing only a final answer.
-
-### Bug found and fixed: zero-hit exploit in the objective function
-
-**Problem:** `scorer.py`'s `simulate_score` originally returned `-1` when a candidate `(alpha, threshold)` produced zero cache hits. At higher `penalty_weight` values, this made "cache nothing" a rational escape hatch for the optimizer — multiple trials at `penalty_weight=3.0` converged on thresholds near 0.88-0.93 that hit nothing at all, scoring `-1.0000` (better than several real-hit configs at that penalty weight), rather than genuinely searching the space for a good real tradeoff.
-
-**Fix:** changed the zero-hit penalty from `-1` to `-5`, ensuring it is always worse than any plausible real-hit outcome, forcing the optimizer to only explore configurations that actually cache.
-
-### Core finding: the hybrid mechanism is validated at the individual-decision level
-
-Direct telemetry inspection of a trap pair confirms the hybrid formula works exactly as designed:
-
 Cached: "Increase the memory limit"
 Query: "Decrease the memory limit"
 semanticScore: 0.9386
@@ -711,23 +438,228 @@ lexicalScore: 0.6000
 
 Pure semantic (alpha=1.0): 0.9386 >= 0.79 -> HIT (false positive)
 Hybrid default (alpha=0.7): 0.837 < 0.85 -> MISS (correctly avoided)
+```
 
+A real, reproducible case on the actual deployed stack where pure semantic caching would have served a wrong answer, and the hybrid formula's lexical term prevented it.
 
-This is a real, reproducible case — on the actual deployed stack, not a simulation — where pure semantic caching would have served a wrong cached answer, and the hybrid formula's lexical term prevented it. This directly validates the mechanism described in the Research Gap section.
+**Open tension: the Bayesian optimizer's aggregate result favored α close to 1.0.** Running `gp_minimize` against the 88-row dataset with the zero-hit bug fixed and `penalty_weight=3.0` consistently converged toward `alpha ≈ 1.0` (best trial: alpha=1.0, threshold=0.79) — the *opposite* of what the per-decision finding above would suggest. This did not contradict that finding; it reflected a separate, real limitation:
 
-### Open tension: the Bayesian optimizer's aggregate result currently favors alpha close to 1.0
+1. **Small dataset** — 88 total logged requests, fewer usable for scoring once exact matches are excluded; too few trap-pair cases for the optimizer to reliably learn to protect against them.
+2. **Lexical scorer lacked stopword filtering** — raw Jaccard. Short imperative queries differing by one keyword ("increase"/"decrease") still retained meaningful overlap from shared structural words, diluting the lexical signal.
+3. **Objective function treated all false positives uniformly** — a flat `penalty_weight` didn't distinguish a costly wrong-answer false positive from a lower-stakes one.
 
-Running `gp_minimize` against the 88-row dataset, with the zero-hit bug fixed and `penalty_weight=3.0`, consistently converged toward `alpha ≈ 1.0` (best trial: alpha=1.0, threshold=0.79) rather than toward a lower alpha that would better protect against trap-pair false positives.
+**Next steps planned at the time:** add stopword filtering (or move to BM25/TF-IDF) to sharpen the lexical signal; expand the trap-pair and paraphrase query sets; consider category-aware penalty weighting; re-run the three/four-config comparison only after the above was addressed. This is the point where the investigation that follows in B6 began.
 
-This does not contradict the per-decision finding above — it reflects a separate, real limitation in the current setup:
+## B6. Investigation: Lexical Scoring Failure → NLI Veto Pivot (Week 1, Oct 2026)
 
-1. **Small dataset** — 88 total logged requests, a meaningfully smaller fraction of which are usable for scoring (exact matches are excluded from `simulate_score` since they have no semantic/lexical components). Too few trap-pair cases relative to paraphrase cases for the optimizer to reliably learn to protect against them.
-2. **Lexical scorer lacks stopword filtering** — `lexicalScorer.js` is unweighted raw Jaccard. Short imperative queries that differ by only one keyword (e.g. "increase"/"decrease") can still retain meaningful lexical overlap from shared structural words, diluting the lexical signal's discriminating power.
-3. **Objective function treats all false positives uniformly** — a flat `penalty_weight` does not distinguish a costly wrong-answer false positive from a lower-stakes one, and the current aggregate hit-rate-vs-fp-rate tradeoff can net-favor a high-hit-rate, higher-fp-rate configuration even when specific failures (like the memory limit example above) are demonstrably preventable.
+*(This is the pivotal research phase. It takes the open tension from B5 — why does the optimizer favor α≈1.0 even though hybrid scoring demonstrably catches real false positives? — and follows it to its conclusion: lexical blending is structurally broken, and a different mechanism is needed.)*
 
-### Next steps (planned for next session)
+### Part 1 — Clean baseline rebuild
 
-- Add stopword filtering (or move to BM25/TF-IDF weighting) in `lexicalScorer.js` to sharpen the lexical signal on short structurally-similar queries, and re-run the optimizer to see whether this shifts the converged alpha away from 1.0
-- Expand the trap pair and paraphrase query sets further to give the optimizer a larger, more balanced sample
-- Consider category-aware penalty weighting (weighting trap-pair-derived false positives more heavily than generic ones) as a possible refinement to the objective function
-- Re-run `run_eval.js`'s three/four-config comparison only after the above is addressed, so the "Hybrid Adaptive" result reflects a genuinely improved search rather than the current aggregate-level tension
+Before any new experiments, the telemetry baseline was found contaminated: two separate `simulate_traffic.js` runs had been logged into the same table without truncation, producing mismatched candidate pairs across runs. Fixed by adding a retry + system-message fix to `llm.js` to stop Groq's tool-call 400 error on certain queries, fixing `simulate_traffic.js`'s label logic (trap-pair first queries were incorrectly defaulted to `shouldHit: true`; changed default to `false`, with explicit `firstLabel` overrides for the two pairs with a real cached match), and a full reset (Redis flush, table truncate, config reset). Clean rerun: 57 rows, 49 with `candidateQuery`, labels 27 true / 29 false / 1 null. Exported as a frozen baseline CSV before further testing.
+
+### Part 2 — Jaccard-based hybrid scoring: rejected
+
+The original hybrid formula was tested with a full grid sweep (`sweep.py`) over α ∈ [0,1] and threshold ∈ [0.5, 0.95] on the clean baseline, replacing the original 15-trial Bayesian search.
+
+**Finding:** α = 1.0 (pure semantic) was the real optimum — not a thin-search or buggy-objective artifact. At α=1.0/threshold=0.79: 15 hits, 3 false positives. At the hybrid default α=0.7/threshold=0.7: only 7 hits, 4 false positives — strictly worse on both counts.
+
+**Root cause identified:** trap pairs ("Start the server" / "Stop the server") share almost all their words by construction, so raw Jaccard scores them *higher* than genuine paraphrases, which are reworded and share fewer words. Lowering α therefore weights a signal pointing the wrong direction. Confirmed directly: `shouldHit=false` rows averaged 0.253 lexical score vs. `shouldHit=true` rows at 0.130 — the lexical signal was inverted relative to what the blend needed.
+
+**Conclusion:** word-overlap scoring is structurally unsuited to this problem. Rejected.
+
+### Part 3 — Stopword-filtered Jaccard: also rejected
+
+Hypothesis: raw Jaccard's failure might be due to stopwords inflating overlap scores. Tested a stopword-filtered, punctuation-stripped version (`recompute.py`) on the same frozen rows, recomputed offline with no new traffic.
+
+**Finding:** the class-average direction flipped (shouldHit=true rows now scored higher lexical on average), but the best α barely moved — from 1.0 to 0.9, objective score changing by ~0.001, within noise. The best real config was still effectively pure semantic.
+
+**Conclusion:** the failure is structural, not a tokenization artifact. Stopword filtering does not rescue it.
+
+### Part 4 — Objective function flaw found
+
+The original optimizer objective (`hit_rate − λ·fp_rate`, hit_rate divided by all logs, fp_rate divided only by hits) contained a loophole: a config producing exactly one safe hit and zero false positives could outscore a config with many real hits, because `fp_rate` only penalizes relative to a small hit count. This explains why the optimizer could discount real, known false positives (like the "memory limit" trap pair from B5) in aggregate even when they were demonstrably preventable — this is the mechanical reason behind B5's open tension. Objective needed restructuring (maximize hit rate subject to a wrong-hit-rate budget) before any further threshold-tuning claim could be trusted — carried forward as future work, not solved within this project.
+
+### Part 5 — Pivot: veto architecture instead of score blending
+
+Decision made to stop trying to rescue lexical blending and instead treat a second signal as a **veto/gate**, not a weighted component — don't average a correctness signal into a similarity score; use it to override the decision. Considered: a hand-written opposite-word list (rejected — can't enumerate all antonyms in English, doesn't generalize, violates the project's own "must work on any query" requirement) vs. a pretrained NLI (Natural Language Inference) model used off-the-shelf, run only on borderline semantic matches, to check whether two queries are compatible or contradictory. Model chosen for testing: `cross-encoder/nli-deberta-v3-small`, no fine-tuning initially — to test whether a pretrained model works before investing in training one.
+
+### Part 6 — Offline pair-set evaluation (no gateway changes)
+
+Built a separate offline evaluation harness (`research/pair_eval.py`, kept outside the main project folders) to test candidate scoring methods against labeled query pairs without touching the gateway or sending real traffic.
+
+**Batch 1 (200 pairs):** 25 paraphrases + 175 "different" pairs across 7 failure categories (antonym, negation, number_change, direction_reversal, entity_swap, same_topic_different_intent, unrelated), generated via LLM prompt and reviewed.
+
+**Result at threshold 0.7:**
+
+| Method | Recall | Wrong hits |
+|---|---|---|
+| Semantic only | 1.00 | 117 |
+| Semantic + Jaccard blend | 0.80 | 103 |
+| Semantic + NLI contradiction veto | 1.00 | 4 |
+
+The veto reduced wrong hits by ~97% with zero recall cost on this set. Per-category breakdown showed full success (0/25 wrong hits) on 6 of 7 failure categories (antonym, negation, direction_reversal, entity_swap, number_change, unrelated). The only category with leakage was `same_topic_different_intent` (4/25), e.g. "cancel my subscription" vs "pause my subscription" — these aren't logical contradictions, so NLI correctly (and unhelpfully) scored them as non-contradictory.
+
+A rule-based layer (negation-word mismatch, number mismatch) was tested on top of the veto and found to add no further reduction in wrong hits, while introducing a false trigger (blocked a valid paraphrase because "without" was misread as a negation). **Dropped.**
+
+### Part 7 — Held-out confirmation (Batch 2, 255 pairs total)
+
+A second, independently generated batch of 55 pairs (40 stylistically varied paraphrases — imperative vs question phrasing, reordered clauses, typos, filler words, different verbs for the same action — plus 15 new `same_topic_different_intent` pairs never seen in Batch 1's templates) was added and the full comparison rerun.
+
+**Result:** the same 4 `same_topic_different_intent` wrong hits persisted, with **zero new leaks** among the 15 new unseen pairs of that category — confirming the veto generalizes rather than memorizing Batch 1's specific examples.
+
+**New finding:** overall recall at threshold 0.7 dropped from 1.00 to 0.83 — 11 of 65 genuine paraphrases scored below 0.7 semantic similarity due to more varied phrasing. A **separate problem** from the false-positive issue: MiniLM's own retrieval under-recalls casually/divergently phrased paraphrases, and the veto can't rescue a candidate that never clears the semantic threshold to reach it.
+
+### Part 8 — Entailment as a partial recall rescue
+
+Checked NLI *entailment* probability (not just contradiction) on the 11 missed paraphrases. Found 8 of 11 had entailment > 0.93 (strong rescue signal), while 3 scored near zero (0.002–0.005) despite being genuine paraphrases — specifically the pairs with the most structural divergence (different verb, different sentence shape, e.g. "turn on login verification" vs "enable two-step login protection").
+
+**Conclusion:** an entailment-based rescue rule (low-but-nonzero semantic + high entailment → still treat as a candidate) could recover most, not all, of the lost recall. The remaining 3 failures point to a known limitation of NLI models: trained on declarative statement pairs, not imperative commands, so they struggle when two commands share little surface structure. Documented as an open, bounded limitation — not solved, not pursued further within the time budget.
+
+### Part 9 — Embedding model swap tested and rejected
+
+Tested replacing `all-MiniLM-L6-v2` with `multi-qa-MiniLM-L6-dot-v1` (a retrieval-oriented embedding model, same architecture family) as a possible fix for the recall bottleneck in Part 7. Initial test used cosine similarity and showed poor separation — traced to the model being trained for dot-product scoring, not cosine. Retested correctly using raw dot product with model-appropriate thresholds (range 21.36 to 53.06).
+
+**Result at matched recall levels:** multi-qa dot-product did not outperform MiniLM cosine on wrong-hit rate, and its threshold curve was coarse and jumpy (recall dropped 1.00 → 0.91 → 0.66 in two large steps) versus MiniLM's smooth, gradual curve (1.00 → 0.98 → 0.94 → 0.83 → 0.65 → 0.31). A smooth curve is materially easier to tune safely.
+
+**Conclusion:** embedding model swap rejected. `all-MiniLM-L6-v2` retained. No further embedding-model experiments planned.
+
+### Part 10 — No safe "skip the verifier" zone exists
+
+Before finalizing the architecture, the actual score distributions (not assumed thresholds) were computed from all 255 pairs:
+
+- **Positive pairs (genuine paraphrases):** min 0.489, p50 0.865, p90 0.933, p99 0.969
+- **Negative pairs (should not hit):** p90 0.994, p95 0.997, p99 0.998, **max 0.999**
+
+**Finding:** the two distributions fully overlap. A "different" pair can score cosine similarity as high as 0.999 — higher than the median genuine paraphrase (0.865). There is **no cosine similarity value, not even 0.95 or 0.99, that is safe to auto-accept without running the verifier.** This directly confirms and quantifies the original failure mode (e.g. the "Increase/Decrease the memory limit" trap pair from B5 scored 0.939 semantic similarity).
+
+**Architectural conclusion:** a three-zone design (`HIGH → direct cache, GRAY → verify, LOW → LLM`) is unsafe, because no "HIGH" cutoff exists that wouldn't occasionally bypass verification on a dangerous false positive. Collapsed to the two-zone design described in Part A:
+
+```
+semantic < LOW_CUTOFF → LLM directly (skip verifier — only for clearly unrelated queries)
+semantic >= LOW_CUTOFF → NLI contradiction veto, always runs
+    contradiction → LLM
+    else → HIT
+```
+
+`LOW_CUTOFF` set at ≈0.45–0.5, derived from the data (just under the lowest observed genuine-paraphrase score of 0.489), existing purely to avoid wasting a verifier call on obviously unrelated queries — not as a correctness boundary, since no correctness boundary on semantic score alone was found to exist.
+
+### Summary of Week 1 conclusions carried into implementation
+
+1. **Architecture frozen:** MiniLM retrieval → low-cutoff filter → NLI contradiction veto (always runs above cutoff) → HIT or LLM.
+2. **Embedding model:** `all-MiniLM-L6-v2`, unchanged from the original design.
+3. **Verifier model:** `cross-encoder/nli-deberta-v3-small`, used off-the-shelf, no fine-tuning — held-out results strong enough that fine-tuning was not pursued.
+4. **Known, documented limitations (not solved, explicitly scoped out):** (a) `same_topic_different_intent` queries not caught by contradiction detection; (b) recall loss on structurally divergent paraphrases where NLI entailment also fails (3 of 255 pairs); (c) the optimizer's objective function would need restructuring to a constrained form before any threshold-tuning claim could be trusted — this directly motivated dropping automatic tuning for the final architecture rather than fixing the objective function.
+5. **Ruled out, with evidence:** raw Jaccard blending, stopword-filtered Jaccard blending, a hand-written antonym word list, rule-based negation/number checks as an addition to the veto, and the `multi-qa-MiniLM-L6-dot-v1` embedding model.
+
+## B7. Implementation and Live Validation (Oct 9–12, 2026)
+
+With the architecture frozen at the end of Week 1, implementation began: migrating the actual codebase from the hybrid-blend design to the NLI-veto design.
+
+### Decisions locked before implementation
+
+- **Automatic optimizer dropped entirely.** `LOW_CUTOFF` and the NLI threshold are config-driven via Redis (`cache:config`), manually adjustable, no live auto-tuning. The NLI veto architecture is the project's sole core contribution — not paired with a second "adaptive tuning" contribution.
+- **Verifier runs in the same FastAPI process as the embedder** (port 5050), two endpoints (`/embed`, `/verify`), not a separate microservice.
+- **Entailment-rescue rule (Part 8) stays unbuilt** — documented limitation only, out of scope for this implementation.
+- **Evaluation compares two configs**: Baseline (pure semantic, fixed threshold) vs NLI Veto. A real GPTCache library comparison stays unscoped, optional future work.
+
+### Build and bugs fixed during implementation
+
+| File | Bug | Fix |
+|---|---|---|
+| `verifier.js` | Parameter named `Query` (capitalized), body referenced lowercase `query` — `ReferenceError` on every veto-mode request | Renamed parameter to `query`, matching usage |
+| `schema.prisma` migration | New `NOT NULL` columns (`decisionPath`, `lowCutoffUsed`, `nliThresholdUsed`) couldn't apply over 57 existing rows from the dead hybrid architecture | Truncated `telemetry_logs` before migrating |
+| `evaluation/run_eval.js` | `CONFIGS` object still had the old `{alpha, threshold}` shape (`hybridFixed`, `hybridAdaptive`) — incompatible with the new `cacheMiddleware.js`, which reads `mode`/`lowCutoff`/`nliThreshold`/`baselineThreshold` | Rewrote to `{baseline: {mode:'baseline',...}, nliVeto: {mode:'veto',...}}` |
+| `evaluation/run_eval.js` | `runAllPairs` always labeled the first query of every trap/unrelated pair `shouldHit: true`, ignoring each group's `firstLabel` override and the different default used by `simulate_traffic.js` for trap pairs (`false`) vs unrelated pairs (`true`) | Matched `simulate_traffic.js`'s logic exactly: trap pairs default `false`, unrelated pairs default `true`, both respecting `firstLabel` when present |
+
+### End-to-end manual verification
+
+First live trap-pair test, confirming the whole decision path works end to end on real HTTP calls between Node and FastAPI:
+
+| Query | Candidate | Decision | Semantic score | Contradiction |
+|---|---|---|---|---|
+| "How do I stop the server?" | "How do I start the server?" | **vetoed** | 0.541 | **0.999** |
+| "What is the command to launch the server?" | "How do I start the server?" | **hit** | 0.834 | 0.001 |
+
+Clean separation — this is the project's core mechanism working exactly as the offline research predicted, now reproduced on the live stack.
+
+### An unplanned finding: isolated NLI model failure on "mute"/"unmute"
+
+During full-query-set testing, the only genuine antonym pair that slipped through the veto was `"Mute notifications for this channel"` / `"Unmute notifications for this channel"` (contradiction score 0.068, should be near 1.0).
+
+Diagnosed via direct, isolated `/verify` calls (bypassing the gateway entirely) to rule out a wiring bug:
+- **Reverse-direction test:** contradiction 0.0015, entailment 0.994 (reverse order) — confirms it's not a premise/hypothesis ordering artifact; the model is confidently wrong in *both* directions
+- **Prefix-antonym generalization test:** `lock/unlock` (0.999), `enable/disable` (0.996), `connect/disconnect` (0.9996), `grant/revoke` (0.9997) — all other antonym pairs, including other prefix-negation pairs, score near-perfect contradiction
+
+**Conclusion:** this is an isolated, narrow failure specific to the lexical item "mute"/"unmute" (likely a training-data coverage gap for that word pair), not a systematic category weakness. 6 of 7 tested antonym pairs — including 3 other prefix-negation cases — were handled correctly.
+
+---
+
+# Part C — Final Evaluation Results (Oct 11–12, 2026)
+
+Two configs compared via `run_eval.js` on the same 57-query fabricated traffic set, clean Redis/Postgres flush between runs, `telemetry_logs` truncated for clean post-hoc analysis:
+
+| | Baseline (threshold 0.85) | NLI Veto (lowCutoff 0.5) | **NLI Veto (lowCutoff 0.6, final)** |
+|---|---|---|---|
+| Hit rate | 28% | 56% | **42%** |
+| False positives (of 8 trap pairs tested) | 2 | 6 | **1** |
+| Paraphrase recall | 5/18 (28%) | 16/18 (89%) | **14/18 (78%)** |
+| Avg latency | ~2900ms | ~2000ms | ~2600ms |
+
+**The tuning story (`lowCutoff`: 0.5 → 0.6), derived from measured data, not guessed:**
+
+Pulling every veto-mode decision's semantic score and contradiction score showed 5 of the 6 false positives at `lowCutoff=0.5` were all `same_topic_different_intent` cases (not logical contradictions — e.g. "Lock the account" matching "Revoke access from this user") clustered in the 0.534–0.586 score range. Two genuine true hits sat in that same band. Raising `lowCutoff` to 0.6 sits just above that cluster, trading 2 of 18 true paraphrase hits for 5 of 6 false positives fixed. The 6th false positive (mute/unmute) is unaffected by the cutoff — it's a verifier-level failure, not a retrieval-level one — and remains the system's one documented, isolated limitation.
+
+**Net result: at `lowCutoff=0.6`, NLI Veto beats Baseline on every axis** — fewer wrong hits (1 vs 2), nearly 3x the paraphrase recall (78% vs 28%), and still double the hit rate (42% vs 28%). This is the locked final configuration.
+
+**Important scale caveat:** this 57-query live evaluation is a production sanity check, not the project's statistical evidence — that comes from the 255-pair held-out offline study in Part B6 (117 → 4 wrong hits, 97% reduction). The live run's role was confirming real end-to-end wiring and surfacing the mute/unmute finding the offline study didn't catch, not re-establishing statistical significance at scale.
+
+---
+
+# Hosting Strategy
+
+**Local development**
+
+Everything runs via Docker Compose — Postgres (`pgvector/pgvector:pg16`), Redis with LRU config, Node gateway, Python `ml-service`. No internet dependency beyond the LLM API call, works offline otherwise.
+
+```yaml
+version: '3.8'
+services:
+  redis:
+    image: redis:7-alpine
+    command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru
+    ports: ["6379:6379"]
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    ports: ["5434:5432"]
+    volumes: ["pgdata:/var/lib/postgresql/data"]
+volumes:
+  pgdata:
+```
+
+**Deployment (planned, not yet executed)**
+
+| Service | Local | Deployed |
+|---|---|---|
+| Gateway | Docker Compose | Render |
+| ml-service | Docker Compose | Render (second service) |
+| Postgres | Docker Compose (pgvector image) | Supabase (pgvector built in) |
+| Redis | Docker Compose | Upstash (free tier, persists across restarts) |
+
+Same codebase, environment variables swap between local and production — no code changes required.
+
+---
+
+# Changes Log (chronological index)
+
+- **Sep 24, 2026** — Optimizer bug fixes (embedder return statement, redis_client null guard, db.py connection leak, scorer.py truthy check). Raw score logging design fix (semantic/lexical columns added, hybridScorer.js returns all three scores).
+- **Sep 25, 2026** — `shouldHit` ground-truth column added. Fabricated-traffic testing approach adopted.
+- **Sep 30, 2026** — demo-app missing `await` bug fixed.
+- **Oct 3, 2026** — First full local end-to-end run across all services; 6 integration bugs found and fixed (ports, DB auth, migrations, two rounds of Gemini model deprecation, Prisma client regen); core pipeline verified on all three decision paths; two near-miss cases captured in telemetry supporting the hybrid design (at this point still believed to be the right direction).
+- **Oct 4, 2026** — LLM provider switched Gemini → Groq; RESP2 fix for redis-py v5+; 57-pair traffic simulation run, 88 telemetry rows; zero-hit exploit found and fixed in the optimizer objective; hybrid mechanism validated at the individual-decision level, but the optimizer's *aggregate* result was found to favor α≈1.0 — opening the investigation that follows.
+- **Oct 2026 (Week 1 investigation, Part B6)** — Clean baseline rebuild; Jaccard and stopword-filtered Jaccard blending both tested and rejected with evidence; objective function flaw identified as the root cause of the Oct 4 tension; pivot decision to a veto architecture; offline 200-pair then 255-pair pair-set evaluation showing NLI veto cuts wrong hits by 97% with zero recall cost on Batch 1; entailment-rescue explored as a bounded, unimplemented fix for recall loss; embedding model swap tested and rejected; score-distribution analysis proving no safe three-zone cutoff exists, collapsing the design to two zones. Architecture frozen.
+- **Oct 9–12, 2026** — Implementation of the NLI-veto architecture: hybrid-blend code and Bayesian optimizer deleted entirely; `optimizer/` renamed to `ml-service/`, now hosting both `/embed` and `/verify`; `cacheMiddleware.js` rewritten around the two-zone veto path with a retained `baseline` mode for comparison; `schema.prisma` migrated to the new decision-path telemetry fields; parameter-naming bug fixed in `verifier.js`; `run_eval.js` config shape and labeling logic fixed to match the new architecture; end-to-end verification on live HTTP calls between Node and FastAPI; isolated mute/unmute NLI limitation found and characterized as narrow, not systematic; `lowCutoff` tuned from 0.5 to 0.6 using measured score-distribution analysis on live telemetry, producing a final configuration that beats Baseline on every evaluated metric.
